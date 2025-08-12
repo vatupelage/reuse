@@ -2,7 +2,10 @@ use std::path::Path;
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
-use crate::types::{SignatureRow, RecoveredKeyRow, ScriptStatsUpdate, ScriptType};
+use crate::types::{SignatureRow, RecoveredKeyRow, ScriptType};
+use std::collections::HashMap;
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 pub struct Database {
     conn: Connection,
@@ -100,25 +103,19 @@ impl Database {
         Ok(())
     }
 
-    pub fn upsert_script_stats_batch(&mut self, updates: &[ScriptStatsUpdate]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+    pub fn upsert_script_stats_batch(&mut self, block_height: u32, script_stats: &HashMap<ScriptType, u64>) -> Result<()> {
+        let conn = self.conn.lock();
         
-        let mut stmt = tx.prepare(
-            "INSERT INTO script_analysis (script_type, count, last_updated) 
-             VALUES (?, ?, CURRENT_TIMESTAMP)
-             ON CONFLICT(script_type) DO UPDATE SET 
-             count = count + ?, last_updated = CURRENT_TIMESTAMP"
-        )?;
-
-        for update in updates {
-            stmt.execute(params![
-                format!("{:?}", update.script_type),
-                update.count,
-                update.count
-            ])?;
+        for (script_type, count) in script_stats {
+            let script_type_str = format!("{:?}", script_type);
+            
+            conn.execute(
+                "INSERT OR REPLACE INTO script_analysis (block_height, script_type, count, updated_at) 
+                 VALUES (?, ?, ?, datetime('now'))",
+                (block_height, script_type_str, count),
+            )?;
         }
-
-        tx.commit()?;
+        
         Ok(())
     }
 

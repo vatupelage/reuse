@@ -7,8 +7,8 @@ pub struct ScannerConfig {
     pub end_block: u32,
     pub threads: usize,
     pub db_path: String,
-    pub batch_size: usize,
-    pub rate_limit_per_sec: u32,
+    pub batch_size: u32,
+    pub rate_limit: u32,
     pub rpc_url: String,
     pub max_requests_per_block: u32,
 }
@@ -33,13 +33,7 @@ pub struct RecoveredKeyRow {
     pub private_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptStatsUpdate {
-    pub script_type: ScriptType,
-    pub count: u64,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ScriptType {
     P2PKH,
     P2SH,
@@ -56,7 +50,7 @@ pub struct RawBlock {
     pub hex: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedBlock {
     pub height: u32,
     pub signatures: Vec<SignatureRow>,

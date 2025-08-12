@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
+use bitcoin::{Block, Transaction, Txid};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use crate::types::RawBlock;
@@ -110,7 +112,37 @@ impl RpcClient {
         Ok(blocks)
     }
 
-    async fn batch_call(&self, requests: &[JsonRpcRequest]) -> Result<Vec<JsonRpcResponse>> {
+    pub async fn get_transaction(&self, txid: &Txid) -> Result<Transaction> {
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "getrawtransaction".to_string(),
+            params: vec![
+                serde_json::Value::String(txid.to_string()),
+                serde_json::Value::Bool(false), // verbose = false to get raw hex
+            ],
+            id: 1,
+        };
+
+        let responses = self.batch_call(&[request]).await?;
+        
+        if let Some(response) = responses.first() {
+            if let Some(result) = &response.result {
+                if let Some(hex_str) = result.as_str() {
+                    let tx_bytes = hex::decode(hex_str)?;
+                    let tx: Transaction = bitcoin::consensus::encode::deserialize(&tx_bytes)?;
+                    Ok(tx)
+                } else {
+                    Err(anyhow!("Invalid response format for getrawtransaction"))
+                }
+            } else {
+                Err(anyhow!("No result in getrawtransaction response"))
+            }
+        } else {
+            Err(anyhow!("No response received for getrawtransaction"))
+        }
+    }
+
+    async fn batch_call(&self, requests: &[JsonRpcRequest]) -> Result<Vec<JsonRpcResponse<serde_json::Value>>> {
         let request_body = serde_json::to_string(&requests)?;
         
         // Basic rate limiting
