@@ -6,6 +6,7 @@ use bitcoin::{
     Address, Network,
     sighash::{SighashCache, EcdsaSighashType},  // Fixed: correct Bitcoin 0.30 imports
 };
+use bitcoin_hashes::Hash;  // Added: for to_byte_array method
 use k256::ecdsa::Signature as K256Signature;
 use tracing;
 
@@ -123,7 +124,7 @@ fn calculate_message_hash_with_cache(
                     &prev_output.script_pubkey, 
                     sighash_type.to_u32()
                 )?;
-                hash.as_byte_array()
+                hash.to_byte_array()
             },
             ScriptType::P2WPKH => {
                 // SegWit v0 signature hash for P2WPKH
@@ -133,7 +134,7 @@ fn calculate_message_hash_with_cache(
                     prev_output.value, 
                     sighash_type
                 )?;
-                hash.as_byte_array()
+                hash.to_byte_array()
             },
             ScriptType::P2WSH => {
                 // SegWit v0 signature hash for P2WSH
@@ -143,7 +144,7 @@ fn calculate_message_hash_with_cache(
                     prev_output.value, 
                     sighash_type
                 )?;
-                hash.as_byte_array()
+                hash.to_byte_array()
             },
             ScriptType::P2SH => {
                 // P2SH can contain legacy or SegWit scripts
@@ -152,7 +153,7 @@ fn calculate_message_hash_with_cache(
                     &prev_output.script_pubkey, 
                     sighash_type.to_u32()
                 )?;
-                hash.as_byte_array()
+                hash.to_byte_array()
             },
             _ => {
                 return Err(anyhow!("Unsupported script type for sighash calculation: {:?}", script_type));
@@ -205,7 +206,7 @@ async fn calculate_message_hash(
                         &prev_output.script_pubkey, 
                         sighash_type.to_u32()
                     )?;
-                    hash.as_byte_array()
+                    hash.to_byte_array()
                 },
                 ScriptType::P2WPKH => {
                     // SegWit v0 signature hash for P2WPKH
@@ -215,7 +216,7 @@ async fn calculate_message_hash(
                         prev_output.value, 
                         sighash_type
                     )?;
-                    hash.as_byte_array()
+                    hash.to_byte_array()
                 },
                 ScriptType::P2WSH => {
                     // SegWit v0 signature hash for P2WSH
@@ -225,7 +226,7 @@ async fn calculate_message_hash(
                         prev_output.value, 
                         sighash_type
                     )?;
-                    hash.as_byte_array()
+                    hash.to_byte_array()
                 },
                 ScriptType::P2SH => {
                     // P2SH can contain legacy or SegWit scripts
@@ -234,7 +235,7 @@ async fn calculate_message_hash(
                         &prev_output.script_pubkey, 
                         sighash_type.to_u32()
                     )?;
-                    hash.as_byte_array()
+                    hash.to_byte_array()
                 },
                 _ => {
                     return Err(anyhow!("Unsupported script type for sighash calculation: {:?}", script_type));
