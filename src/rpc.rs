@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::collections::HashMap;
-use tokio::time::sleep;
+use crate::types::RawBlock;
 
 #[derive(Debug)]
 pub struct RpcClient {

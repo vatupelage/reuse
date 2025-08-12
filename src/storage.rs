@@ -1,6 +1,6 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
-use crate::types::{SignatureRow, ScriptType};
+use crate::types::{SignatureRow, ScriptType, RecoveredKeyRow};
 use std::collections::HashMap;
 
 pub struct Database {

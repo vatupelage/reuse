@@ -1,12 +1,11 @@
 use anyhow::{anyhow, Result};
 use k256::{
-    ecdsa::Signature as K256Signature,
     Scalar,
+    elliptic_curve::PrimeField,
 };
-use num_bigint::BigUint;
+use num_bigint::{BigUint, ToBigUint};
 use num_traits::{Zero, ToPrimitive};
-use std::collections::HashMap;
-use std::str::FromStr;
+use num_integer::Integer;
 use sha2::{Sha256, Digest};
 use crate::types::{SignatureRow, RecoveredKeyRow};
 
@@ -86,7 +85,7 @@ fn parse_hex_to_scalar(hex_str: &str) -> Result<Scalar> {
     let mut buf = [0u8; 32];
     buf.copy_from_slice(&bytes);
     
-    Scalar::from_repr(buf.into())
+    Scalar::from_repr_vartime(buf.into())
         .or_else(|| anyhow!("Invalid scalar value"))
 }
 
