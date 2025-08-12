@@ -4,7 +4,7 @@ use bitcoin::{
     Block, PublicKey, Script, Transaction, TxIn, TxOut,
     blockdata::script::Instruction,
     Address, Network,
-    sighash::{self, Prevouts, SighashCache, EcdsaSighashType},  // Fixed: correct Bitcoin 0.30 imports
+    sighash::{self, SighashCache, EcdsaSighashType},  // Fixed: correct Bitcoin 0.30 imports
 };
 use k256::ecdsa::Signature as K256Signature;
 use std::collections::HashMap;
@@ -110,8 +110,7 @@ fn calculate_message_hash_with_cache(
 
         let sighash_type = EcdsaSighashType::from_consensus(sighash_type as u32);
         
-        // Bitcoin 0.30 correct API:
-        let prevouts = Prevouts::All(&[prev_output]); // You'll need to collect all prevouts
+        // Bitcoin 0.30 correct API - no need for Prevouts for these methods
         let mut sighash_cache = SighashCache::new(tx);
         
         // Determine script type from previous output
@@ -120,7 +119,7 @@ fn calculate_message_hash_with_cache(
         let hash = match script_type {
             ScriptType::P2PKH | ScriptType::P2PK => {
                 // Legacy sighash - use correct Bitcoin 0.30 API
-                sighash_cache.legacy_signature_hash(
+                sighash_cache.p2pkh_signature_hash(
                     input_index, 
                     &prev_output.script_pubkey, 
                     sighash_type.to_u32()
@@ -128,7 +127,7 @@ fn calculate_message_hash_with_cache(
             },
             ScriptType::P2WPKH => {
                 // SegWit v0 signature hash for P2WPKH
-                sighash_cache.segwit_signature_hash(
+                sighash_cache.p2wpkh_signature_hash(
                     input_index, 
                     &prev_output.script_pubkey, 
                     prev_output.value, 
@@ -137,7 +136,7 @@ fn calculate_message_hash_with_cache(
             },
             ScriptType::P2WSH => {
                 // SegWit v0 signature hash for P2WSH
-                sighash_cache.segwit_signature_hash(
+                sighash_cache.p2wsh_signature_hash(
                     input_index, 
                     &prev_output.script_pubkey, 
                     prev_output.value, 
@@ -146,7 +145,7 @@ fn calculate_message_hash_with_cache(
             },
             ScriptType::P2SH => {
                 // P2SH can contain legacy or SegWit scripts
-                sighash_cache.legacy_signature_hash(
+                sighash_cache.p2sh_signature_hash(
                     input_index, 
                     &prev_output.script_pubkey, 
                     sighash_type.to_u32()
@@ -158,7 +157,7 @@ fn calculate_message_hash_with_cache(
         };
 
         // Fixed: use correct method to get bytes from Sighash in Bitcoin 0.30
-        Ok(hash.to_raw_hash().to_byte_array())
+        Ok(hash.to_byte_array())
     } else {
         // Fallback: use a placeholder z-value when we can't fetch the previous transaction
         // This allows the scanner to continue processing other signatures
@@ -189,8 +188,7 @@ async fn calculate_message_hash(
 
             let sighash_type = EcdsaSighashType::from_consensus(sighash_type as u32);
             
-            // Bitcoin 0.30 correct API:
-            let prevouts = Prevouts::All(&[prev_output]); // You'll need to collect all prevouts
+            // Bitcoin 0.30 correct API - no need for Prevouts for these methods
             let mut sighash_cache = SighashCache::new(tx);
             
             // Determine script type from previous output
@@ -199,7 +197,7 @@ async fn calculate_message_hash(
             let hash = match script_type {
                 ScriptType::P2PKH | ScriptType::P2PK => {
                     // Legacy sighash - use correct Bitcoin 0.30 API
-                    sighash_cache.legacy_signature_hash(
+                    sighash_cache.p2pkh_signature_hash(
                         input_index, 
                         &prev_output.script_pubkey, 
                         sighash_type.to_u32()
@@ -207,7 +205,7 @@ async fn calculate_message_hash(
                 },
                 ScriptType::P2WPKH => {
                     // SegWit v0 signature hash for P2WPKH
-                    sighash_cache.segwit_signature_hash(
+                    sighash_cache.p2wpkh_signature_hash(
                         input_index, 
                         &prev_output.script_pubkey, 
                         prev_output.value, 
@@ -216,7 +214,7 @@ async fn calculate_message_hash(
                 },
                 ScriptType::P2WSH => {
                     // SegWit v0 signature hash for P2WSH
-                    sighash_cache.segwit_signature_hash(
+                    sighash_cache.p2wsh_signature_hash(
                         input_index, 
                         &prev_output.script_pubkey, 
                         prev_output.value, 
@@ -225,7 +223,7 @@ async fn calculate_message_hash(
                 },
                 ScriptType::P2SH => {
                     // P2SH can contain legacy or SegWit scripts
-                    sighash_cache.legacy_signature_hash(
+                    sighash_cache.p2sh_signature_hash(
                         input_index, 
                         &prev_output.script_pubkey, 
                         sighash_type.to_u32()
@@ -237,7 +235,7 @@ async fn calculate_message_hash(
             };
 
             // Fixed: use correct method to get bytes from Sighash in Bitcoin 0.30
-            Ok(hash.to_raw_hash().to_byte_array())
+            Ok(hash.to_byte_array())
         },
         Err(e) => {
             // Fallback: use a placeholder z-value when we can't fetch the previous transaction
