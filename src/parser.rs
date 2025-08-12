@@ -1,132 +1,153 @@
 use anyhow::{anyhow, Result};
 use bitcoin::{
-    blockdata::script::{Instruction, Script},
-    blockdata::transaction::TxIn,
-    consensus::encode,
-    Address, Network, PublicKey,
+    consensus::encode::deserialize,
+    Block, PublicKey, Script, Transaction, TxIn, TxOut, Witness,
+    util::sighash::{SighashCache, EcdsaSighashType},
+    hashes::Hash,
 };
-use bitcoin::secp256k1::ecdsa::Signature as SecpSignature;
 use k256::ecdsa::Signature as K256Signature;
 use std::collections::HashMap;
 
 use crate::types::{ParsedBlock, RawBlock, ScriptStatsUpdate, SignatureRow, ScriptType};
 
-pub fn parse_block(block: RawBlock) -> Result<ParsedBlock> {
-    // Decode raw block hex
-    let block_bytes = hex::decode(&block.raw_hex)
-        .map_err(|e| anyhow!("failed to decode block hex: {e}"))?;
-    
-    let block_data: bitcoin::Block = encode::deserialize(&block_bytes)
-        .map_err(|e| anyhow!("failed to deserialize block: {e}"))?;
-
+pub fn parse_block(raw_block: &RawBlock) -> Result<ParsedBlock> {
+    let block: Block = deserialize(&hex::decode(&raw_block.hex)?)?;
     let mut signatures = Vec::new();
-    let mut script_stats: HashMap<ScriptType, u64> = HashMap::new();
-    let mut tx_count = 0;
-    let mut sig_count = 0;
+    let mut script_stats = std::collections::HashMap::new();
 
-    // Process each transaction
-    for tx in &block_data.txdata {
-        tx_count += 1;
-        
-        // Process inputs (where signatures are)
-        for input in tx.input.iter() {
-            if let Some(sig) = extract_signature_from_input(input) {
-                sig_count += 1;
-                
-                // Extract pubkey if available
-                let (pubkey_hex, address, script_type) = extract_pubkey_and_address(input);
+    for (tx_index, tx) in block.txdata.iter().enumerate() {
+        for (input_index, input) in tx.input.iter().enumerate() {
+            // Extract signature and sighash type
+            if let Some((sig, sighash_type)) = extract_signature_from_input(input) {
+                // Extract public key and address
+                if let Some((pubkey, address, script_type)) = extract_pubkey_and_address(input, &block, tx_index, input_index)? {
+                    // Calculate real message hash (z-value)
+                    let z_value = if let Some(prev_output) = get_previous_output(input, &block, tx_index, input_index)? {
+                        calculate_message_hash(tx, input_index, &prev_output, sighash_type)?
+                    } else {
+                        // Fallback if we can't get previous output
+                        [0u8; 32]
+                    };
 
-                // Convert secp256k1 DER signature into k256 signature to get r/s
-                let der = sig.serialize_der();
-                let ksig = match K256Signature::from_der(der.as_ref()) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let compact = ksig.to_bytes(); // 64 bytes: r||s
-                let r_hex = hex::encode(&compact[..32]);
-                let s_hex = hex::encode(&compact[32..]);
-                
-                // Create signature row
-                let sig_row = SignatureRow {
-                    txid: tx.txid().to_string(),
-                    block_height: block.height,
-                    address,
-                    pubkey_hex,
-                    r_hex,
-                    s_hex,
-                    z_hex: "0000000000000000000000000000000000000000000000000000000000000000".to_string(), // Placeholder
-                    script_type: format!("{:?}", script_type),
-                };
-                
-                signatures.push(sig_row);
-                
-                // Update script stats
-                *script_stats.entry(script_type).or_insert(0) += 1;
+                    let sig_row = SignatureRow {
+                        txid: tx.txid().to_string(),
+                        block_height: raw_block.height,
+                        address: address.to_string(),
+                        pubkey: hex::encode(pubkey.to_bytes()),
+                        r: hex::encode(sig.r.to_bytes()),
+                        s: hex::encode(sig.s.to_bytes()),
+                        z: hex::encode(z_value),
+                        script_type,
+                    };
+                    
+                    signatures.push(sig_row);
+                    
+                    // Update script statistics
+                    *script_stats.entry(script_type).or_insert(0) += 1;
+                }
             }
         }
     }
 
-    // Convert script stats to updates
-    let script_updates: Vec<ScriptStatsUpdate> = script_stats
-        .into_iter()
-        .map(|(script_type, count)| ScriptStatsUpdate { script_type, count })
-        .collect();
-
     Ok(ParsedBlock {
-        height: block.height,
-        tx_count,
-        sig_count,
+        height: block.header.height,
         signatures,
-        script_stats: script_updates,
+        script_stats,
     })
 }
 
-fn parse_der_signature_with_sighash(bytes: &[u8]) -> Option<SecpSignature> {
-    if bytes.is_empty() {
-        return None;
+fn calculate_message_hash(
+    tx: &Transaction, 
+    input_index: usize, 
+    prev_output: &TxOut, 
+    sighash_type: u8
+) -> Result<[u8; 32]> {
+    let sighash_type = EcdsaSighashType::from_consensus(sighash_type as u32);
+    let mut cache = SighashCache::new(tx);
+    
+    // Determine script type from previous output
+    let script_type = determine_script_type(&prev_output.script_pubkey);
+    
+    match script_type {
+        ScriptType::P2PKH | ScriptType::P2SH => {
+            Ok(cache.legacy_signature_hash(
+                input_index, 
+                &prev_output.script_pubkey, 
+                sighash_type.to_u32()
+            )?)
+        },
+        ScriptType::P2WPKH | ScriptType::P2WSH => {
+            Ok(cache.segwit_signature_hash(
+                input_index, 
+                &prev_output.script_pubkey, 
+                prev_output.value, 
+                sighash_type
+            )?)
+        },
+        _ => Err(anyhow!("Unsupported script type for sighash calculation: {:?}", script_type)),
     }
-    // Strip sighash type byte (last byte)
-    let der_bytes = &bytes[..bytes.len().saturating_sub(1)];
-    if der_bytes.first().copied() != Some(0x30) {
-        return None;
-    }
-    if let Ok(sig) = SecpSignature::from_der(der_bytes) {
-        return Some(sig);
-    }
-    // Try lax DER if strict fails
-    if let Ok(sig) = SecpSignature::from_der_lax(der_bytes) {
-        return Some(sig);
-    }
-    None
 }
 
-fn extract_signature_from_input(input: &TxIn) -> Option<SecpSignature> {
-    // Try scriptSig pushes
-    for ins in input.script_sig.instructions() {
-        if let Ok(Instruction::PushBytes(data)) = ins {
-            if let Some(sig) = parse_der_signature_with_sighash(data.as_bytes()) {
-                return Some(sig);
+fn determine_script_type(script: &Script) -> ScriptType {
+    if script.is_p2pkh() {
+        ScriptType::P2PKH
+    } else if script.is_p2sh() {
+        ScriptType::P2SH
+    } else if script.is_p2wpkh() {
+        ScriptType::P2WPKH
+    } else if script.is_p2wsh() {
+        ScriptType::P2WSH
+    } else if script.is_p2pk() {
+        ScriptType::P2PK
+    } else {
+        ScriptType::NonStandard
+    }
+}
+
+fn extract_signature_from_input(input: &TxIn) -> Option<(K256Signature, u8)> {
+    let mut candidates = Vec::new();
+    
+    // Try to parse signature from scriptSig pushes
+    for opcode in input.script_sig.iter_pushdata() {
+        if let Ok(bytes) = opcode {
+            candidates.push(bytes);
+        }
+    }
+    
+    // For witness inputs, check witness data
+    for witness_item in input.witness.iter() {
+        candidates.push(witness_item);
+    }
+
+    for candidate in candidates {
+        // Check if this looks like a signature (DER format)
+        if candidate.len() > 1 {
+            let sighash_byte = candidate.last().unwrap();
+            let sighash_type = sighash_byte & 0x1f;
+            
+            // Strip sighash byte for signature parsing
+            let sig_bytes = &candidate[..candidate.len() - 1];
+            
+            // Try strict DER first
+            if let Ok(sig) = K256Signature::from_der(sig_bytes) {
+                return Some((sig, sighash_type));
+            }
+            // Fallback to lax DER parsing
+            if let Ok(sig) = K256Signature::from_der_lax(sig_bytes) {
+                return Some((sig, sighash_type));
             }
         }
     }
-
-    // Try witness items (P2WPKH / P2WSH)
-    for item in input.witness.iter() {
-        if let Some(sig) = parse_der_signature_with_sighash(item) {
-            return Some(sig);
-        }
-    }
-
     None
 }
 
-fn extract_pubkey_and_address(input: &TxIn) -> (Option<String>, Option<String>, ScriptType) {
+fn extract_pubkey_and_address(input: &TxIn, block: &Block, tx_index: usize, input_index: usize) -> Result<Option<(PublicKey, String, ScriptType)>> {
     // Check witness first (p2wpkh common case)
-    for item in input.witness.iter() {
-        if is_likely_pubkey(item) {
-            if let Ok(pubkey) = PublicKey::from_slice(item) {
+    for witness_item in input.witness.iter() {
+        if is_likely_pubkey(witness_item) {
+            if let Ok(pubkey) = PublicKey::from_slice(witness_item) {
                 let address = pubkey_to_address(&pubkey);
-                return (Some(hex::encode(pubkey.to_bytes())), address, ScriptType::P2WPKH);
+                return Ok(Some((pubkey, address, ScriptType::P2WPKH)));
             }
         }
     }
@@ -138,13 +159,13 @@ fn extract_pubkey_and_address(input: &TxIn) -> (Option<String>, Option<String>, 
             if is_likely_pubkey(bytes) {
                 if let Ok(pubkey) = PublicKey::from_slice(bytes) {
                     let address = pubkey_to_address(&pubkey);
-                    return (Some(hex::encode(pubkey.to_bytes())), address, ScriptType::P2PKH);
+                    return Ok(Some((pubkey, address, ScriptType::P2PKH)));
                 }
             }
         }
     }
 
-    (None, None, ScriptType::NonStandard)
+    Ok(None)
 }
 
 fn is_likely_pubkey(bytes: &[u8]) -> bool {
@@ -164,3 +185,15 @@ fn pubkey_to_address(pubkey: &PublicKey) -> Option<String> {
 }
 
 fn classify_p2sh_script(_script: &Script) -> Option<ScriptType> { None }
+
+// Helper function to get previous output (simplified - in practice you'd need UTXO access)
+fn get_previous_output(
+    _input: &TxIn, 
+    _block: &Block, 
+    _tx_index: usize, 
+    _input_index: usize
+) -> Result<Option<TxOut>> {
+    // TODO: Implement proper UTXO lookup
+    // For now, return None to use fallback z-value
+    Ok(None)
+}

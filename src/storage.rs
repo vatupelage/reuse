@@ -1,135 +1,182 @@
 use std::path::Path;
 
 use anyhow::Result;
-use rusqlite::{params, Connection, TransactionBehavior};
-
-use crate::types::{RecoveredKeyRow, SignatureRow, ScriptStatsUpdate};
+use rusqlite::{Connection, params};
+use crate::types::{SignatureRow, RecoveredKeyRow, ScriptStatsUpdate, ScriptType};
 
 pub struct Database {
     conn: Connection,
 }
 
 impl Database {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", &"WAL")?;
-        conn.pragma_update(None, "synchronous", &"NORMAL")?;
-        conn.pragma_update(None, "temp_store", &"MEMORY")?;
-        Ok(Self { conn })
+        conn.execute("PRAGMA journal_mode = WAL", [])?;
+        conn.execute("PRAGMA synchronous = NORMAL", [])?;
+        conn.execute("PRAGMA cache_size = 10000", [])?;
+        conn.execute("PRAGMA temp_store = MEMORY", [])?;
+        
+        let db = Self { conn };
+        db.init_schema()?;
+        Ok(db)
     }
 
-    pub fn init_schema(&self) -> Result<()> {
-        self.conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS signatures (
+    fn init_schema(&self) -> Result<()> {
+        // Create signatures table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS signatures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 txid TEXT NOT NULL,
                 block_height INTEGER NOT NULL,
-                address TEXT,
-                pubkey TEXT,
+                address TEXT NOT NULL,
+                pubkey TEXT NOT NULL,
                 r TEXT NOT NULL,
                 s TEXT NOT NULL,
                 z TEXT NOT NULL,
-                script_type TEXT NOT NULL
-            );
+                script_type TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
 
-            CREATE TABLE IF NOT EXISTS recovered_keys (
+        // Create recovered_keys table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS recovered_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 txid1 TEXT NOT NULL,
                 txid2 TEXT NOT NULL,
                 r TEXT NOT NULL,
-                private_key TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS script_analysis (
-                script_type TEXT PRIMARY KEY,
-                count INTEGER NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_signatures_r ON signatures(r);
-            CREATE INDEX IF NOT EXISTS idx_signatures_pubkey ON signatures(pubkey);
-            CREATE INDEX IF NOT EXISTS idx_signatures_address ON signatures(address);
-            CREATE INDEX IF NOT EXISTS idx_signatures_txid ON signatures(txid);
-            CREATE INDEX IF NOT EXISTS idx_signatures_r_pubkey ON signatures(r, pubkey);
-            CREATE INDEX IF NOT EXISTS idx_signatures_address_script ON signatures(address, script_type);
-        "#,
+                private_key TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
         )?;
+
+        // Create script_analysis table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS script_analysis (
+                script_type TEXT PRIMARY KEY,
+                count INTEGER NOT NULL,
+                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+
+        // Create indexes for performance
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_r ON signatures(r)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_pubkey ON signatures(pubkey)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_address ON signatures(address)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_txid ON signatures(txid)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_block_height ON signatures(block_height)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_recovered_keys_r ON recovered_keys(r)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_recovered_keys_txid1 ON recovered_keys(txid1)", [])?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_recovered_keys_txid2 ON recovered_keys(txid2)", [])?;
+
         Ok(())
     }
 
     pub fn insert_signatures_batch(&mut self, sigs: &[SignatureRow]) -> Result<()> {
-        if sigs.is_empty() { return Ok(()); }
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO signatures (txid, block_height, address, pubkey, r, s, z, script_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-            )?;
-            for s in sigs {
-                stmt.execute(params![
-                    s.txid,
-                    s.block_height as i64,
-                    s.address,
-                    s.pubkey_hex,
-                    s.r_hex,
-                    s.s_hex,
-                    s.z_hex,
-                    s.script_type,
-                ])?;
-            }
+        let tx = self.conn.transaction()?;
+        
+        let mut stmt = tx.prepare(
+            "INSERT INTO signatures (txid, block_height, address, pubkey, r, s, z, script_type) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )?;
+
+        for sig in sigs {
+            stmt.execute(params![
+                sig.txid,
+                sig.block_height,
+                sig.address,
+                sig.pubkey,
+                sig.r,
+                sig.s,
+                sig.z,
+                format!("{:?}", sig.script_type)
+            ])?;
         }
+
         tx.commit()?;
         Ok(())
     }
 
-    pub fn upsert_script_stats_batch(&mut self, stats: &[ScriptStatsUpdate]) -> Result<()> {
-        if stats.is_empty() { return Ok(()); }
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO script_analysis (script_type, count) VALUES (?1, ?2)
-                 ON CONFLICT(script_type) DO UPDATE SET count = script_analysis.count + excluded.count"
-            )?;
-            for s in stats {
-                let key = format!("{:?}", s.script_type);
-                stmt.execute(params![key, s.count as i64])?;
-            }
+    pub fn upsert_script_stats_batch(&mut self, updates: &[ScriptStatsUpdate]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        
+        let mut stmt = tx.prepare(
+            "INSERT INTO script_analysis (script_type, count, last_updated) 
+             VALUES (?, ?, CURRENT_TIMESTAMP)
+             ON CONFLICT(script_type) DO UPDATE SET 
+             count = count + ?, last_updated = CURRENT_TIMESTAMP"
+        )?;
+
+        for update in updates {
+            stmt.execute(params![
+                format!("{:?}", update.script_type),
+                update.count,
+                update.count
+            ])?;
         }
+
         tx.commit()?;
         Ok(())
     }
 
-    pub fn insert_recovered_key(&mut self, row: &RecoveredKeyRow) -> Result<()> {
+    pub fn insert_recovered_key(&mut self, key: &RecoveredKeyRow) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO recovered_keys (txid1, txid2, r, private_key) VALUES (?1, ?2, ?3, ?4)",
-            params![row.txid1, row.txid2, row.r_hex, row.private_key_wif],
+            "INSERT INTO recovered_keys (txid1, txid2, r, private_key) VALUES (?, ?, ?, ?)",
+            params![key.txid1, key.txid2, key.r, key.private_key],
         )?;
         Ok(())
     }
 
-    pub fn preload_recent_r_values(&self, limit: usize, cache: &mut crate::cache::RValueCache) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT txid, block_height, address, pubkey, r, s, z, script_type FROM signatures ORDER BY rowid DESC LIMIT ?1")?;
-        let rows = stmt.query_map([limit as i64], |row| {
+    pub fn preload_recent_r_values(&self, limit: usize) -> Result<Vec<SignatureRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT txid, block_height, address, pubkey, r, s, z, script_type 
+             FROM signatures 
+             ORDER BY block_height DESC, id DESC 
+             LIMIT ?"
+        )?;
+
+        let rows = stmt.query_map(params![limit], |row| {
+            let script_type_str: String = row.get(7)?;
+            let script_type = match script_type_str.as_str() {
+                "P2PKH" => ScriptType::P2PKH,
+                "P2SH" => ScriptType::P2SH,
+                "P2WPKH" => ScriptType::P2WPKH,
+                "P2WSH" => ScriptType::P2WSH,
+                "P2PK" => ScriptType::P2PK,
+                "Multisig" => ScriptType::Multisig,
+                _ => ScriptType::NonStandard,
+            };
+
             Ok(SignatureRow {
                 txid: row.get(0)?,
-                block_height: row.get::<_, i64>(1)? as u64,
+                block_height: row.get(1)?,
                 address: row.get(2)?,
-                pubkey_hex: row.get(3)?,
-                r_hex: row.get(4)?,
-                s_hex: row.get(5)?,
-                z_hex: row.get(6)?,
-                script_type: row.get(7)?,
+                pubkey: row.get(3)?,
+                r: row.get(4)?,
+                s: row.get(5)?,
+                z: row.get(6)?,
+                script_type,
             })
         })?;
-        for r in rows {
-            cache.insert_only(r?);
+
+        let mut signatures = Vec::new();
+        for row in rows {
+            signatures.push(row?);
         }
-        Ok(())
+
+        Ok(signatures)
     }
 
-    pub fn flush(&self) -> Result<()> { Ok(()) }
+    pub fn get_signature_count(&self) -> Result<u64> {
+        let count: u64 = self.conn.query_row("SELECT COUNT(*) FROM signatures", [], |row| row.get(0))?;
+        Ok(count)
+    }
 
-    pub fn save_report(&self, _stats: &crate::stats::RuntimeStats) -> Result<()> {
-        // For brevity, skip persistence of separate JSON; caller can pipe logs.
-        Ok(())
+    pub fn get_recovered_key_count(&self) -> Result<u64> {
+        let count: u64 = self.conn.query_row("SELECT COUNT(*) FROM recovered_keys", [], |row| row.get(0))?;
+        Ok(count)
     }
 }

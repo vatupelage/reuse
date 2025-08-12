@@ -1,104 +1,89 @@
+use indicatif::ProgressBar;
 use std::time::Instant;
-use indicatif::{ProgressBar, ProgressStyle};
+use tracing::info;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct RuntimeStats {
-    pub start_time: Option<Instant>,
-    pub blocks_scanned: u64,
+    pub blocks_processed: u64,
     pub transactions_processed: u64,
     pub signatures_processed: u64,
-    pub r_reuse: u64,
+    pub r_value_reuse_detected: u64,
     pub keys_recovered: u64,
     pub api_calls: u64,
+    start_time: Option<Instant>,
     progress_bar: Option<ProgressBar>,
 }
 
 impl RuntimeStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn start(&mut self) {
         self.start_time = Some(Instant::now());
-        
-        // Create progress bar
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} [{elapsed_precise}] {msg}")
-                .unwrap()
-        );
-        self.progress_bar = Some(pb);
+        self.progress_bar = Some(ProgressBar::new_spinner());
+        info!("Scanner started");
     }
 
     pub fn report_progress(&self) {
-        if let Some(t0) = self.start_time {
-            let elapsed = t0.elapsed().as_secs_f64();
-            let sigs_per_sec = if elapsed > 0.0 {
-                self.signatures_processed as f64 / elapsed
-            } else {
-                0.0
-            };
-            
-            let msg = format!(
-                "Blocks: {} | Txs: {} | Sigs: {} | R-reuse: {} | Keys: {} | API: {} | Rate: {:.0} sigs/s",
-                self.blocks_scanned,
+        if let Some(progress_bar) = &self.progress_bar {
+            let message = format!(
+                "Blocks: {} | Txs: {} | Sigs: {} | R-reuse: {} | Keys: {} | API calls: {}",
+                self.blocks_processed,
                 self.transactions_processed,
                 self.signatures_processed,
-                self.r_reuse,
+                self.r_value_reuse_detected,
                 self.keys_recovered,
                 self.api_calls,
-                sigs_per_sec
             );
-            
-            if let Some(pb) = &self.progress_bar {
-                pb.set_message(msg);
-            }
-            
-            tracing::info!(
-                blocks = self.blocks_scanned,
-                txs = self.transactions_processed,
-                sigs = self.signatures_processed,
-                r_reuse = self.r_reuse,
-                keys = self.keys_recovered,
-                api_calls = self.api_calls,
-                rate = format!("{:.0} sigs/s", sigs_per_sec),
-                "progress"
-            );
+            progress_bar.set_message(message);
         }
+
+        info!(
+            "Progress - Blocks: {}, Txs: {}, Sigs: {}, R-reuse: {}, Keys: {}, API: {}",
+            self.blocks_processed,
+            self.transactions_processed,
+            self.signatures_processed,
+            self.r_value_reuse_detected,
+            self.keys_recovered,
+            self.api_calls,
+        );
     }
 
     pub fn print_summary(&self) {
-        if let Some(t0) = self.start_time {
-            let elapsed = t0.elapsed();
-            let elapsed_secs = elapsed.as_secs_f64();
+        if let Some(start_time) = self.start_time {
+            let duration = start_time.elapsed();
             
-            println!("\n=== SCAN COMPLETE ===");
-            println!("Duration: {:.2}s", elapsed_secs);
-            println!("Blocks scanned: {}", self.blocks_scanned);
-            println!("Transactions processed: {}", self.transactions_processed);
-            println!("Signatures processed: {}", self.signatures_processed);
-            println!("R-value reuse detected: {}", self.r_reuse);
-            println!("Private keys recovered: {}", self.keys_recovered);
-            println!("API calls made: {}", self.api_calls);
+            info!("=");
+            info!("SCAN COMPLETED");
+            info!("=");
+            info!("Duration: {:.2?}", duration);
+            info!("Blocks processed: {}", self.blocks_processed);
+            info!("Transactions processed: {}", self.transactions_processed);
+            info!("Signatures processed: {}", self.signatures_processed);
+            info!("R-value reuse detected: {}", self.r_value_reuse_detected);
+            info!("Private keys recovered: {}", self.keys_recovered);
+            info!("API calls made: {}", self.api_calls);
             
-            if elapsed_secs > 0.0 {
-                println!("Average rate: {:.0} signatures/second", 
-                    self.signatures_processed as f64 / elapsed_secs);
-                println!("API efficiency: {:.1} requests/block", 
-                    self.api_calls as f64 / self.blocks_scanned.max(1) as f64);
+            if duration.as_secs() > 0 {
+                let blocks_per_sec = self.blocks_processed as f64 / duration.as_secs() as f64;
+                let sigs_per_sec = self.signatures_processed as f64 / duration.as_secs() as f64;
+                let api_per_sec = self.api_calls as f64 / duration.as_secs() as f64;
+                
+                info!("Performance:");
+                info!("  Blocks per second: {:.2}", blocks_per_sec);
+                info!("  Signatures per second: {:.2}", sigs_per_sec);
+                info!("  API calls per second: {:.2}", api_per_sec);
             }
             
-            if self.r_reuse > 0 {
-                println!("\n🚨 VULNERABILITIES FOUND! 🚨");
-                println!("{} transactions with reused R-values detected", self.r_reuse);
-                if self.keys_recovered > 0 {
-                    println!("{} private keys successfully recovered", self.keys_recovered);
-                }
-            } else {
-                println!("\n✅ No R-value reuse vulnerabilities detected in scanned blocks");
+            if self.r_value_reuse_detected > 0 {
+                info!("");
+                info!("VULNERABILITIES DETECTED:");
+                info!("  R-value reuse: {} instances", self.r_value_reuse_detected);
+                info!("  Private keys recovered: {}", self.keys_recovered);
+                info!("");
+                info!("CRITICAL: These vulnerabilities could allow attackers to steal funds!");
             }
-        }
-        
-        // Finish progress bar
-        if let Some(pb) = &self.progress_bar {
-            pb.finish_with_message("Scan complete!");
         }
     }
 }

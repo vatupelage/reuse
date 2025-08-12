@@ -1,155 +1,159 @@
-use std::{collections::HashMap, time::Duration};
-
 use anyhow::{anyhow, Result};
-use parking_lot::Mutex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
-
 use crate::types::RawBlock;
 
-#[derive(Clone)]
+#[derive(Debug)]
 pub struct RpcClient {
     http: Client,
     url: String,
-    rate_limit_per_sec: usize,
-    cache: BlockCache,
+    rate_limit_per_sec: u32,
+    block_cache: BlockCache,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug)]
 struct BlockCache {
-    inner: std::sync::Arc<Mutex<HashMap<u64, RawBlock>>>,
+    cache: HashMap<u32, RawBlock>,
 }
 
 impl BlockCache {
-    fn get(&self, h: &u64) -> Option<RawBlock> { self.inner.lock().get(h).cloned() }
-    fn put(&self, h: u64, b: RawBlock) { self.inner.lock().insert(h, b); }
-}
+    fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
 
-#[derive(Serialize)]
-struct JsonRpcRequest<'a> {
-    jsonrpc: &'static str,
-    id: u64,
-    method: &'a str,
-    params: serde_json::Value,
-}
+    fn get(&self, height: u32) -> Option<&RawBlock> {
+        self.cache.get(&height)
+    }
 
-#[derive(Deserialize)]
-struct JsonRpcResponse<T> {
-    result: Option<T>,
-    error: Option<RpcError>,
-    id: Option<serde_json::Value>,
+    fn insert(&mut self, height: u32, block: RawBlock) {
+        self.cache.insert(height, block);
+    }
 }
-
-#[derive(Deserialize, Debug)]
-struct RpcError { code: i64, message: String }
 
 impl RpcClient {
-    pub fn new(url: String, rate_limit_per_sec: usize) -> Self {
+    pub fn new(url: &str, rate_limit_per_sec: u32) -> Result<Self> {
         let http = Client::builder()
-            .tcp_nodelay(true)
-            .pool_max_idle_per_host(16)
-            .http2_adaptive_window(true)
-            .build()
-            .expect("reqwest client");
-        Self { http, url, rate_limit_per_sec, cache: BlockCache::default() }
+            .timeout(Duration::from_secs(30))
+            .build()?;
+
+        Ok(Self {
+            http,
+            url: url.to_string(),
+            rate_limit_per_sec,
+            block_cache: BlockCache::new(),
+        })
     }
 
-    pub async fn fetch_blocks_batch(&self, heights: &[u64]) -> Result<Vec<RawBlock>> {
-        // Check cache first
-        let mut need: Vec<u64> = Vec::new();
-        let mut out: Vec<RawBlock> = Vec::new();
-        for h in heights {
-            if let Some(b) = self.cache.get(h) { out.push(b); } else { need.push(*h); }
-        }
-        if need.is_empty() { return Ok(out); }
+    pub async fn fetch_blocks_batch(&self, start_height: u32, end_height: u32) -> Result<Vec<RawBlock>> {
+        let mut blocks = Vec::new();
+        
+        // Fetch block hashes first
+        let heights: Vec<u32> = (start_height..=end_height).collect();
+        let hash_requests: Vec<JsonRpcRequest> = heights
+            .iter()
+            .map(|&height| JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "getblockhash".to_string(),
+                params: vec![height],
+                id: height as i64,
+            })
+            .collect();
 
-        // Build batch: for each height, get blockhash then get block by hash with verbosity=0
-        // To minimize calls, we will submit a single batch containing getblockhash for all heights,
-        // then a second batch of getblock for the hashes; QuickNode supports batches.
-        let hash_reqs: Vec<JsonRpcRequest> = need.iter().enumerate().map(|(i, h)| JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: i as u64,
-            method: "getblockhash",
-            params: serde_json::json!([h]),
-        }).collect();
-
-        let hashes: Vec<String> = self.batch_call(hash_reqs).await?;
-
-        let block_reqs: Vec<JsonRpcRequest> = hashes.iter().enumerate().map(|(i, hash)| JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: i as u64,
-            method: "getblock",
-            params: serde_json::json!([hash, 0]),
-        }).collect();
-
-        let blocks_hex: Vec<String> = self.batch_call(block_reqs).await?;
-
-        for (i, raw_hex) in blocks_hex.into_iter().enumerate() {
-            let h = need[i];
-            let hash = &hashes[i];
-            let rb = RawBlock { height: h, hash: hash.clone(), raw_hex };
-            self.cache.put(h, rb.clone());
-            out.push(rb);
-        }
-
-        Ok(out)
-    }
-
-    async fn batch_call<T>(&self, reqs: Vec<JsonRpcRequest<'_>>) -> Result<Vec<T>>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let mut attempt = 0u32;
-        loop {
-            attempt += 1;
-            // rudimentary rate limiting by sleeping proportional to number of calls
-            let per_sec = self.rate_limit_per_sec.max(1) as u64;
-            let millis = (1000 * (reqs.len() as u64)).saturating_div(per_sec);
-            if millis > 0 { sleep(Duration::from_millis(millis)).await; }
-
-            let resp = self.http.post(&self.url).json(&reqs).send().await;
-            match resp {
-                Ok(r) => {
-                    if r.status().as_u16() == 429 {
-                        self.backoff(attempt).await;
-                        continue;
-                    }
-                    let text = r.text().await?;
-                    let v: serde_json::Value = serde_json::from_str(&text)
-                        .map_err(|e| anyhow!("invalid jsonrpc response: {e}; text={}", text))?;
-                    // Expect array of responses
-                    let arr = v.as_array().ok_or_else(|| anyhow!("batch response not array"))?;
-                    let mut out: Vec<T> = Vec::with_capacity(arr.len());
-                    for item in arr {
-                        if let Some(err) = item.get("error") {
-                            self.handle_error(err)?;
-                        }
-                        let res = item.get("result").ok_or_else(|| anyhow!("missing result"))?;
-                        let val: T = serde_json::from_value(res.clone())?;
-                        out.push(val);
-                    }
-                    return Ok(out);
-                }
-                Err(e) => {
-                    self.backoff(attempt).await;
-                    if attempt > 6 { return Err(anyhow!("rpc error after retries: {e}")); }
-                    continue;
+        let hashes_response = self.batch_call(&hash_requests).await?;
+        
+        // Extract block hashes
+        let mut block_hashes = Vec::new();
+        for response in hashes_response {
+            if let Some(result) = response.result {
+                if let Some(hash) = result.as_str() {
+                    block_hashes.push(hash.to_string());
                 }
             }
         }
+
+        // Fetch raw blocks using hashes
+        let block_requests: Vec<JsonRpcRequest> = block_hashes
+            .iter()
+            .map(|hash| JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "getblock".to_string(),
+                params: vec![hash, 0], // 0 = raw hex format
+                id: 1,
+            })
+            .collect();
+
+        let blocks_response = self.batch_call(&block_requests).await?;
+        
+        // Extract raw blocks
+        for (i, response) in blocks_response.iter().enumerate() {
+            if let Some(result) = &response.result {
+                if let Some(block_data) = result.get("hex") {
+                    if let Some(hex_str) = block_data.as_str() {
+                        let block = RawBlock {
+                            height: start_height + i as u32,
+                            hex: hex_str.to_string(),
+                        };
+                        blocks.push(block);
+                    }
+                }
+            }
+        }
+
+        Ok(blocks)
     }
 
-    fn handle_error(&self, err: &serde_json::Value) -> Result<()> {
-        let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        if code != 0 { return Err(anyhow!("rpc error {}: {}", code, msg)); }
-        Ok(())
-    }
+    async fn batch_call(&self, requests: &[JsonRpcRequest]) -> Result<Vec<JsonRpcResponse>> {
+        let request_body = serde_json::to_string(&requests)?;
+        
+        // Basic rate limiting
+        let delay = Duration::from_secs(1) / self.rate_limit_per_sec;
+        sleep(delay).await;
+        
+        let response = self.http
+            .post(&self.url)
+            .header("Content-Type", "application/json")
+            .body(request_body)
+            .send()
+            .await?;
 
-    async fn backoff(&self, attempt: u32) {
-        let base = 200u64;
-        let delay = base.saturating_mul(1u64 << attempt.min(6));
-        sleep(Duration::from_millis(delay)).await;
+        if !response.status().is_success() {
+            if response.status().as_u16() == 429 {
+                // Rate limited - exponential backoff
+                sleep(Duration::from_secs(2)).await;
+                return self.batch_call(requests).await;
+            }
+            return Err(anyhow!("RPC request failed: {}", response.status()));
+        }
+
+        let response_text = response.text().await?;
+        let responses: Vec<JsonRpcResponse> = serde_json::from_str(&response_text)?;
+        
+        Ok(responses)
     }
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    method: String,
+    params: Vec<serde_json::Value>,
+    id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcResponse {
+    result: Option<serde_json::Value>,
+    error: Option<RpcError>,
+    id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RpcError {
+    code: i32,
+    message: String,
 }

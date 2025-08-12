@@ -1,61 +1,64 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScannerConfig {
-    pub start_block: u64,
-    pub end_block: u64,
-    pub batch_size: usize,
-    pub max_requests_per_block: usize,
+    pub start_block: u32,
+    pub end_block: u32,
     pub threads: usize,
+    pub db_path: String,
+    pub batch_size: usize,
+    pub rate_limit_per_sec: u32,
+    pub rpc_url: String,
+    pub max_requests_per_block: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RawBlock {
-    pub height: u64,
-    pub hash: String,
-    pub raw_hex: String,
+pub struct SignatureRow {
+    pub txid: String,
+    pub block_height: u32,
+    pub address: String,
+    pub pubkey: String,
+    pub r: String,
+    pub s: String,
+    pub z: String,
+    pub script_type: ScriptType,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub enum ScriptType {
-    P2PKH,
-    P2WPKH,
-    P2SH,
-    P2WSH,
-    NonStandard,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveredKeyRow {
+    pub txid1: String,
+    pub txid2: String,
+    pub r: String,
+    pub private_key: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptStatsUpdate {
     pub script_type: ScriptType,
     pub count: u64,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum ScriptType {
+    P2PKH,
+    P2SH,
+    P2WPKH,
+    P2WSH,
+    P2PK,
+    Multisig,
+    NonStandard,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawBlock {
+    pub height: u32,
+    pub hex: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedBlock {
-    pub height: u64,
-    pub tx_count: usize,
-    pub sig_count: usize,
+    pub height: u32,
     pub signatures: Vec<SignatureRow>,
-    pub script_stats: Vec<ScriptStatsUpdate>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SignatureRow {
-    pub txid: String,
-    pub block_height: u64,
-    pub address: Option<String>,
-    pub pubkey_hex: Option<String>,
-    pub r_hex: String,
-    pub s_hex: String,
-    pub z_hex: String,
-    pub script_type: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct RecoveredKeyRow {
-    pub txid1: String,
-    pub txid2: String,
-    pub r_hex: String,
-    pub private_key_wif: String,
+    pub script_stats: HashMap<ScriptType, u64>,
 }

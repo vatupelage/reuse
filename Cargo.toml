@@ -6,32 +6,31 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 thiserror = "1.0"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "time", "fs", "sync", "signal"] }
-reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "rustls-tls"] }
+tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
-rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+tracing-subscriber = "0.3"
+rusqlite = { version = "0.29", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
-bitcoin = { version = "0.31", default-features = false, features = ["base64", "std", "serde"] }
-secp256k1 = { version = "0.28", features = ["std", "rand-std", "serde", "recovery"] }
+bitcoin = { version = "0.31", features = ["serde"] }
+k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
 lru = "0.12"
-bytes = "1.6"
+bytes = "1.0"
 parking_lot = "0.12"
 fnv = "1.0"
-url = "2.5"
+url = "2.0"
 rand = "0.8"
 indicatif = "0.17"
 futures = "0.3"
-num_cpus = "1.16"
+num_cpus = "1.0"
 num-bigint = "0.4"
 num-traits = "0.2"
-num-integer = "0.1"
 sha2 = "0.10"
-k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
+num-integer = "0.1"
 
 [profile.release]
 lto = true
