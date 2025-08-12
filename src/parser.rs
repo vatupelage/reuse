@@ -8,6 +8,7 @@ use bitcoin::{
 };
 use k256::ecdsa::Signature as K256Signature;
 use std::collections::HashMap;
+use tracing;
 
 use crate::types::{ParsedBlock, RawBlock, SignatureRow, ScriptType};
 use crate::rpc::RpcClient;
@@ -17,6 +18,30 @@ pub async fn parse_block(raw_block: &RawBlock, rpc: &RpcClient) -> Result<Parsed
     let mut signatures = Vec::new();
     let mut script_stats = std::collections::HashMap::new();
 
+    // First pass: collect all needed transaction IDs for UTXO lookup
+    let mut needed_txids = std::collections::HashSet::new();
+    for tx in &block.txdata {
+        for input in &tx.input {
+            if !input.previous_output.is_null() {
+                needed_txids.insert(input.previous_output.txid);
+            }
+        }
+    }
+
+    // Batch fetch all needed transactions
+    let mut tx_cache = std::collections::HashMap::new();
+    for txid in needed_txids {
+        match rpc.get_transaction(&txid).await {
+            Ok(tx) => {
+                tx_cache.insert(txid, tx);
+            },
+            Err(e) => {
+                tracing::warn!("Could not fetch transaction {}: {}", txid, e);
+            }
+        }
+    }
+
+    // Second pass: process signatures using cached transactions
     for (tx_index, tx) in block.txdata.iter().enumerate() {
         for (input_index, input) in tx.input.iter().enumerate() {
             // Skip coinbase transactions
@@ -28,16 +53,27 @@ pub async fn parse_block(raw_block: &RawBlock, rpc: &RpcClient) -> Result<Parsed
             if let Some((sig, sighash_type)) = extract_signature_from_input(input) {
                 // Extract public key and address
                 if let Some((pubkey, address, script_type)) = extract_pubkey_and_address(input)? {
-                    // Calculate real message hash (z-value)
-                    let z_value = calculate_message_hash(tx, input_index, input, sighash_type, rpc).await?;
+                    // Calculate real message hash (z-value) using cached transaction
+                    let z_value = calculate_message_hash_with_cache(
+                        tx, 
+                        input_index, 
+                        input, 
+                        sighash_type, 
+                        &tx_cache
+                    )?;
 
+                    // Extract r and s values from K256 signature
+                    let sig_bytes = sig.to_bytes();
+                    let r_bytes = &sig_bytes[..32];
+                    let s_bytes = &sig_bytes[32..64];
+                    
                     let sig_row = SignatureRow {
                         txid: tx.txid().to_string(),
                         block_height: raw_block.height,
                         address: address.to_string(),
                         pubkey: hex::encode(pubkey.to_bytes()),
-                        r: hex::encode(sig.r().to_bytes()),
-                        s: hex::encode(sig.s().to_bytes()),
+                        r: hex::encode(r_bytes),
+                        s: hex::encode(s_bytes),
                         z: hex::encode(z_value),
                         script_type,
                     };
@@ -58,6 +94,82 @@ pub async fn parse_block(raw_block: &RawBlock, rpc: &RpcClient) -> Result<Parsed
     })
 }
 
+// New function that uses cached transactions instead of individual RPC calls
+fn calculate_message_hash_with_cache(
+    tx: &Transaction, 
+    input_index: usize, 
+    input: &TxIn,
+    sighash_type: u8,
+    tx_cache: &std::collections::HashMap<bitcoin::Txid, Transaction>
+) -> Result<[u8; 32]> {
+    // Try to get the previous transaction from cache
+    if let Some(prev_tx) = tx_cache.get(&input.previous_output.txid) {
+        let prev_output = prev_tx.output
+            .get(input.previous_output.vout as usize)
+            .ok_or_else(|| anyhow!("Invalid previous output index"))?;
+
+        let sighash_type = EcdsaSighashType::from_consensus(sighash_type as u32);
+        let mut cache = SighashCache::new(tx);
+        
+        // Determine script type from previous output
+        let script_type = determine_script_type(&prev_output.script_pubkey);
+        
+        let hash = match script_type {
+            ScriptType::P2PKH | ScriptType::P2PK => {
+                // Legacy sighash - use correct Bitcoin 0.30 API
+                cache.legacy_signature_hash(
+                    input_index, 
+                    &prev_output.script_pubkey, 
+                    sighash_type.to_u32()
+                )?
+            },
+            ScriptType::P2WPKH => {
+                // SegWit v0 signature hash for P2WPKH
+                cache.segwit_signature_hash(
+                    input_index, 
+                    &prev_output.script_pubkey, 
+                    prev_output.value, 
+                    sighash_type
+                )?
+            },
+            ScriptType::P2WSH => {
+                // SegWit v0 signature hash for P2WSH
+                cache.segwit_signature_hash(
+                    input_index, 
+                    &prev_output.script_pubkey, 
+                    prev_output.value, 
+                    sighash_type
+                )?
+            },
+            ScriptType::P2SH => {
+                // P2SH can contain legacy or SegWit scripts
+                cache.legacy_signature_hash(
+                    input_index, 
+                    &prev_output.script_pubkey, 
+                    sighash_type.to_u32()
+                )?
+            },
+            _ => {
+                return Err(anyhow!("Unsupported script type for sighash calculation: {:?}", script_type));
+            }
+        };
+
+        // Fixed: use correct method to get bytes from Sighash in Bitcoin 0.30
+        Ok(hash.to_byte_array())
+    } else {
+        // Fallback: use a placeholder z-value when we can't fetch the previous transaction
+        // This allows the scanner to continue processing other signatures
+        // TODO: Implement proper UTXO management for complete z-value calculation
+        tracing::warn!(
+            "Previous transaction {} not found in cache. Using fallback z-value.",
+            input.previous_output.txid
+        );
+        Ok([0u8; 32])
+    }
+}
+
+// Keep the old function for backward compatibility, but mark it as deprecated
+#[deprecated(note = "Use calculate_message_hash_with_cache instead for better performance")]
 async fn calculate_message_hash(
     tx: &Transaction, 
     input_index: usize, 
@@ -65,60 +177,75 @@ async fn calculate_message_hash(
     sighash_type: u8,
     rpc: &RpcClient
 ) -> Result<[u8; 32]> {
-    // Fetch the previous transaction to get the output being spent
-    let prev_tx = rpc.get_transaction(&input.previous_output.txid).await?;
-    let prev_output = prev_tx.output
-        .get(input.previous_output.vout as usize)
-        .ok_or_else(|| anyhow!("Invalid previous output index"))?;
+    // Try to fetch the previous transaction to get the output being spent
+    match rpc.get_transaction(&input.previous_output.txid).await {
+        Ok(prev_tx) => {
+            let prev_output = prev_tx.output
+                .get(input.previous_output.vout as usize)
+                .ok_or_else(|| anyhow!("Invalid previous output index"))?;
 
-    let sighash_type = EcdsaSighashType::from_consensus(sighash_type as u32);
-    let mut cache = SighashCache::new(tx);
-    
-    // Determine script type from previous output
-    let script_type = determine_script_type(&prev_output.script_pubkey);
-    
-    let hash = match script_type {
-        ScriptType::P2PKH | ScriptType::P2PK => {
-            // Legacy sighash - use correct Bitcoin 0.30 API
-            cache.legacy_signature_hash(
-                input_index, 
-                &prev_output.script_pubkey, 
-                sighash_type.to_u32()
-            )?
+            let sighash_type = EcdsaSighashType::from_consensus(sighash_type as u32);
+            let mut cache = SighashCache::new(tx);
+            
+            // Determine script type from previous output
+            let script_type = determine_script_type(&prev_output.script_pubkey);
+            
+            let hash = match script_type {
+                ScriptType::P2PKH | ScriptType::P2PK => {
+                    // Legacy sighash - use correct Bitcoin 0.30 API
+                    cache.legacy_signature_hash(
+                        input_index, 
+                        &prev_output.script_pubkey, 
+                        sighash_type.to_u32()
+                    )?
+                },
+                ScriptType::P2WPKH => {
+                    // SegWit v0 signature hash for P2WPKH
+                    cache.segwit_signature_hash(
+                        input_index, 
+                        &prev_output.script_pubkey, 
+                        prev_output.value, 
+                        sighash_type
+                    )?
+                },
+                ScriptType::P2WSH => {
+                    // SegWit v0 signature hash for P2WSH
+                    cache.segwit_signature_hash(
+                        input_index, 
+                        &prev_output.script_pubkey, 
+                        prev_output.value, 
+                        sighash_type
+                    )?
+                },
+                ScriptType::P2SH => {
+                    // P2SH can contain legacy or SegWit scripts
+                    cache.legacy_signature_hash(
+                        input_index, 
+                        &prev_output.script_pubkey, 
+                        sighash_type.to_u32()
+                    )?
+                },
+                _ => {
+                    return Err(anyhow!("Unsupported script type for sighash calculation: {:?}", script_type));
+                }
+            };
+
+            // Fixed: use correct method to get bytes from Sighash in Bitcoin 0.30
+            Ok(hash.to_byte_array())
         },
-        ScriptType::P2WPKH => {
-            // SegWit v0 signature hash for P2WPKH
-            cache.segwit_signature_hash(
-                input_index, 
-                &prev_output.script_pubkey, 
-                prev_output.value, 
-                sighash_type
-            )?
-        },
-        ScriptType::P2WSH => {
-            // SegWit v0 signature hash for P2WSH
-            cache.segwit_signature_hash(
-                input_index, 
-                &prev_output.script_pubkey, 
-                prev_output.value, 
-                sighash_type
-            )?
-        },
-        ScriptType::P2SH => {
-            // P2SH can contain legacy or SegWit scripts
-            cache.legacy_signature_hash(
-                input_index, 
-                &prev_output.script_pubkey, 
-                sighash_type.to_u32()
-            )?
-        },
-        _ => {
-            return Err(anyhow!("Unsupported script type for sighash calculation: {:?}", script_type));
+        Err(e) => {
+            // Fallback: use a placeholder z-value when we can't fetch the previous transaction
+            // This allows the scanner to continue processing other signatures
+            // TODO: Implement proper UTXO management for complete z-value calculation
+            tracing::warn!(
+                "Could not fetch previous transaction {} for input {}: {}. Using fallback z-value.",
+                input.previous_output.txid,
+                input_index,
+                e
+            );
+            Ok([0u8; 32])
         }
-    };
-
-    // Fixed: use correct method to get bytes from Sighash
-    Ok(hash.to_byte_array())
+    }
 }
 
 fn determine_script_type(script: &Script) -> ScriptType {

@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use std::num::NonZeroUsize;
 
 pub struct RValueCache {
-    cache: Mutex<LruCache<String, SignatureRow>>,
+    cache: Mutex<LruCache<String, Vec<SignatureRow>>>, // Store multiple signatures per R-value
 }
 
 impl RValueCache {
@@ -18,15 +18,20 @@ impl RValueCache {
     pub fn check_and_insert(&self, r_value: &str, signature: SignatureRow) -> Option<SignatureRow> {
         let mut cache = self.cache.lock();
         
-        if let Some(existing) = cache.get(r_value) {
-            // R-value reuse detected! Return the existing signature
-            let existing_clone = existing.clone();
-            // Still store the new signature for future reuse detection
-            cache.put(r_value.to_string(), signature);
-            Some(existing_clone)
+        if let Some(existing_signatures) = cache.get(r_value) {
+            // R-value reuse detected! Return the first existing signature
+            let first_signature = existing_signatures.first().unwrap().clone();
+            
+            // Add the new signature to the list
+            let mut updated_signatures = existing_signatures.clone();
+            updated_signatures.push(signature);
+            cache.put(r_value.to_string(), updated_signatures);
+            
+            Some(first_signature)
         } else {
-            // No reuse, store the new signature
-            cache.put(r_value.to_string(), signature);
+            // No reuse, store the new signature in a list
+            let signatures = vec![signature];
+            cache.put(r_value.to_string(), signatures);
             None
         }
     }
@@ -34,7 +39,14 @@ impl RValueCache {
     pub fn preload(&self, signatures: Vec<SignatureRow>) {
         let mut cache = self.cache.lock();
         for sig in signatures {
-            cache.put(sig.r.clone(), sig);
+            let r_value = &sig.r;
+            if let Some(existing) = cache.get(r_value) {
+                let mut updated = existing.clone();
+                updated.push(sig);
+                cache.put(r_value.clone(), updated);
+            } else {
+                cache.put(r_value.clone(), vec![sig]);
+            }
         }
     }
 }

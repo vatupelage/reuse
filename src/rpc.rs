@@ -181,8 +181,8 @@ struct JsonRpcRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct JsonRpcResponse {
-    result: Option<serde_json::Value>,
+struct JsonRpcResponse<T> {
+    result: Option<T>,
     error: Option<RpcError>,
     id: i64,
 }
