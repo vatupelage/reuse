@@ -35,34 +35,34 @@ pub fn attempt_recover_k_and_priv(
         return Ok(None);
     }
 
-    // Calculate the difference in Z values
+    // Calculate the difference in Z values using modular arithmetic
     let z_diff = if z1 > z2 {
         z1 - z2
     } else {
         z2 - z1
     };
 
-    // Calculate the difference in S values
+    // Calculate the difference in S values using modular arithmetic
     let s_diff = if s1 > s2 {
         s1 - s2
     } else {
         s2 - s1
     };
 
-    // Calculate the inverse of the S difference
-    let s_diff_inv = s_diff.invert().unwrap_or(Scalar::ZERO);
-    if s_diff_inv == Scalar::ZERO {
-        return Ok(None);
-    }
+    // Calculate the inverse of the S difference - handle CtOption properly
+    let s_diff_inv = match s_diff.invert() {
+        Some(inv) => inv,
+        None => return Ok(None), // No inverse exists
+    };
 
     // Calculate k = (z1 - z2) * (s1 - s2)^(-1) mod n
     let k = z_diff * s_diff_inv;
 
     // Calculate the private key: priv = (s1 * k - z1) * r^(-1) mod n
-    let r_inv = r1.invert().unwrap_or(Scalar::ZERO);
-    if r_inv == Scalar::ZERO {
-        return Ok(None);
-    }
+    let r_inv = match r1.invert() {
+        Some(inv) => inv,
+        None => return Ok(None), // No inverse exists
+    };
 
     let priv_key = (s1 * k - z1) * r_inv;
 

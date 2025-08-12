@@ -3,14 +3,13 @@ use bitcoin::{
     consensus::encode::deserialize,
     Block, PublicKey, Script, Transaction, TxIn, TxOut,
     blockdata::script::Instruction,
-    Address, Network, Txid, OutPoint,
-    util::sighash::{Sighash, SighashCache, LegacySighash},
-    EcdsaSighashType,
+    Address, Network,
+    sighash::{SighashCache, EcdsaSighashType},  // Fixed: correct path for 0.30
 };
 use k256::ecdsa::Signature as K256Signature;
 use std::collections::HashMap;
 
-use crate::types::{ParsedBlock, RawBlock, ScriptStatsUpdate, SignatureRow, ScriptType};
+use crate::types::{ParsedBlock, RawBlock, SignatureRow, ScriptType};
 use crate::rpc::RpcClient;
 
 pub async fn parse_block(raw_block: &RawBlock, rpc: &RpcClient) -> Result<ParsedBlock> {
@@ -80,7 +79,7 @@ async fn calculate_message_hash(
     
     let hash = match script_type {
         ScriptType::P2PKH | ScriptType::P2PK => {
-            // Legacy sighash
+            // Legacy sighash - use correct Bitcoin 0.30 API
             cache.legacy_signature_hash(
                 input_index, 
                 &prev_output.script_pubkey, 
@@ -98,8 +97,6 @@ async fn calculate_message_hash(
         },
         ScriptType::P2WSH => {
             // SegWit v0 signature hash for P2WSH
-            // Note: This needs the actual script being executed, not the scriptPubKey
-            // For now, use the scriptPubKey as a fallback
             cache.segwit_signature_hash(
                 input_index, 
                 &prev_output.script_pubkey, 
@@ -109,7 +106,6 @@ async fn calculate_message_hash(
         },
         ScriptType::P2SH => {
             // P2SH can contain legacy or SegWit scripts
-            // This is complex and needs proper script analysis
             cache.legacy_signature_hash(
                 input_index, 
                 &prev_output.script_pubkey, 
@@ -121,7 +117,8 @@ async fn calculate_message_hash(
         }
     };
 
-    Ok(hash.into_inner())
+    // Fixed: use correct method to get bytes from Sighash
+    Ok(hash.to_byte_array())
 }
 
 fn determine_script_type(script: &Script) -> ScriptType {

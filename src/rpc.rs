@@ -38,7 +38,7 @@ impl BlockCache {
 }
 
 impl RpcClient {
-    pub fn new(url: &str, rate_limit_per_sec: u32) -> Result<Self> {
+    pub fn new(url: &str) -> Result<Self> {
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()?;
@@ -46,7 +46,7 @@ impl RpcClient {
         Ok(Self {
             http,
             url: url.to_string(),
-            rate_limit_per_sec,
+            rate_limit_per_sec: 10, // Default rate limit
             block_cache: BlockCache::new(),
         })
     }
@@ -166,7 +166,7 @@ impl RpcClient {
         }
 
         let response_text = response.text().await?;
-        let responses: Vec<JsonRpcResponse> = serde_json::from_str(&response_text)?;
+        let responses: Vec<JsonRpcResponse<serde_json::Value>> = serde_json::from_str(&response_text)?;
         
         Ok(responses)
     }

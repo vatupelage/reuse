@@ -19,10 +19,13 @@ impl RValueCache {
         let mut cache = self.cache.lock();
         
         if let Some(existing) = cache.get(r_value) {
-            // R-value reuse detected!
-            Some(existing.clone())
+            // R-value reuse detected! Return the existing signature
+            let existing_clone = existing.clone();
+            // Still store the new signature for future reuse detection
+            cache.put(r_value.to_string(), signature);
+            Some(existing_clone)
         } else {
-            // Insert new signature
+            // No reuse, store the new signature
             cache.put(r_value.to_string(), signature);
             None
         }

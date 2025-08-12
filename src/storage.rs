@@ -4,8 +4,6 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use crate::types::{SignatureRow, RecoveredKeyRow, ScriptType};
 use std::collections::HashMap;
-use parking_lot::Mutex;
-use std::sync::Arc;
 
 pub struct Database {
     conn: Connection,
@@ -55,7 +53,7 @@ impl Database {
             [],
         )?;
 
-        // Create script_analysis table
+        // Create script_analysis table - Fixed schema to match code usage
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS script_analysis (
                 script_type TEXT PRIMARY KEY,
@@ -103,16 +101,16 @@ impl Database {
         Ok(())
     }
 
-    pub fn upsert_script_stats_batch(&mut self, block_height: u32, script_stats: &HashMap<ScriptType, u64>) -> Result<()> {
-        let conn = self.conn.lock();
+    pub fn upsert_script_stats_batch(&mut self, script_stats: &HashMap<ScriptType, u64>) -> Result<()> {
+        // Fixed: Connection doesn't need locking, it's already single-threaded
         
         for (script_type, count) in script_stats {
             let script_type_str = format!("{:?}", script_type);
             
-            conn.execute(
-                "INSERT OR REPLACE INTO script_analysis (block_height, script_type, count, updated_at) 
-                 VALUES (?, ?, ?, datetime('now'))",
-                (block_height, script_type_str, count),
+            self.conn.execute(
+                "INSERT OR REPLACE INTO script_analysis (script_type, count, last_updated) 
+                 VALUES (?, ?, datetime('now'))",
+                (script_type_str, count),
             )?;
         }
         

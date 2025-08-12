@@ -55,10 +55,22 @@ async fn main() -> Result<()> {
         .with_max_level(Level::INFO)
         .init();
 
-    let config = Cli::parse();
+    let cli = Cli::parse();
     
     info!("Starting Bitcoin ECDSA vulnerability scanner");
-    info!("Configuration: {:?}", config);
+    info!("Configuration: {:?}", cli);
+
+    // Convert CLI to ScannerConfig
+    let config = ScannerConfig {
+        start_block: cli.start_block,
+        end_block: cli.end_block,
+        threads: cli.threads,
+        db_path: cli.db_path,
+        batch_size: cli.batch_size,
+        rate_limit: cli.rate_limit,
+        rpc_url: cli.rpc_url,
+        max_requests_per_block: cli.max_requests_per_block,
+    };
 
     // Initialize database
     let mut db = Database::open(&config.db_path)?;
@@ -115,7 +127,7 @@ async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCac
             db.insert_signatures_batch(&parsed_block.signatures)?;
             
             // Update script statistics
-            db.upsert_script_stats_batch(parsed_block.height, &parsed_block.script_stats)?;
+            db.upsert_script_stats_batch(&parsed_block.script_stats)?;
             
             stats.blocks_processed += 1;
             stats.transactions_processed += parsed_block.signatures.len() as u64;
