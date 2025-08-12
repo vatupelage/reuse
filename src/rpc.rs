@@ -1,12 +1,10 @@
 use anyhow::{anyhow, Result};
-use bitcoin::{Block, Transaction, Txid};
+use bitcoin::{Transaction, Txid};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use crate::types::RawBlock;
 
 #[derive(Debug)]
 pub struct RpcClient {
@@ -145,10 +143,6 @@ impl RpcClient {
     async fn batch_call(&self, requests: &[JsonRpcRequest]) -> Result<Vec<JsonRpcResponse<serde_json::Value>>> {
         let request_body = serde_json::to_string(&requests)?;
         
-        // Basic rate limiting
-        let delay = Duration::from_secs(1) / self.rate_limit_per_sec;
-        sleep(delay).await;
-        
         let response = self.http
             .post(&self.url)
             .header("Content-Type", "application/json")
@@ -157,12 +151,7 @@ impl RpcClient {
             .await?;
 
         if !response.status().is_success() {
-            if response.status().as_u16() == 429 {
-                // Rate limited - exponential backoff
-                sleep(Duration::from_secs(2)).await;
-                return self.batch_call(requests).await;
-            }
-            return Err(anyhow!("RPC request failed: {}", response.status()));
+            return Err(anyhow!("HTTP error: {}", response.status()));
         }
 
         let response_text = response.text().await?;

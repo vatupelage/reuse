@@ -42,10 +42,10 @@ impl RValueCache {
             let r_value = &sig.r;
             if let Some(existing) = cache.get(r_value) {
                 let mut updated = existing.clone();
-                updated.push(sig);
+                updated.push(sig.clone());
                 cache.put(r_value.clone(), updated);
             } else {
-                cache.put(r_value.clone(), vec![sig]);
+                cache.put(r_value.clone(), vec![sig.clone()]);
             }
         }
     }

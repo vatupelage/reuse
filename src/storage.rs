@@ -1,8 +1,6 @@
-use std::path::Path;
-
 use anyhow::Result;
 use rusqlite::{Connection, params};
-use crate::types::{SignatureRow, RecoveredKeyRow, ScriptType};
+use crate::types::{SignatureRow, ScriptType};
 use std::collections::HashMap;
 
 pub struct Database {
@@ -76,27 +74,29 @@ impl Database {
         Ok(())
     }
 
-    pub fn insert_signatures_batch(&mut self, sigs: &[SignatureRow]) -> Result<()> {
+    pub fn insert_signatures_batch(&mut self, signatures: &[SignatureRow]) -> Result<()> {
         let tx = self.conn.transaction()?;
-        
+
         let mut stmt = tx.prepare(
-            "INSERT INTO signatures (txid, block_height, address, pubkey, r, s, z, script_type) 
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO signatures (txid, block_height, address, pubkey, r, s, z, script_type, created_at) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
         )?;
 
-        for sig in sigs {
-            stmt.execute(params![
-                sig.txid,
+        for sig in signatures {
+            stmt.execute((
+                &sig.txid,
                 sig.block_height,
-                sig.address,
-                sig.pubkey,
-                sig.r,
-                sig.s,
-                sig.z,
-                format!("{:?}", sig.script_type)
-            ])?;
+                &sig.address,
+                &sig.pubkey,
+                &sig.r,
+                &sig.s,
+                &sig.z,
+                format!("{:?}", sig.script_type),
+            ))?;
         }
 
+        // Drop the statement before committing
+        drop(stmt);
         tx.commit()?;
         Ok(())
     }

@@ -2,12 +2,12 @@ use anyhow::{anyhow, Result};
 use k256::{
     ecdsa::Signature as K256Signature,
     Scalar,
-    elliptic_curve::PrimeField,
 };
-use num_bigint::{BigUint, ToBigUint};
-use num_traits::{One, Zero, ToPrimitive};
-use num_integer::Integer;
+use num_bigint::BigUint;
+use num_traits::{Zero, ToPrimitive};
+use std::collections::HashMap;
 use std::str::FromStr;
+use sha2::{Sha256, Digest};
 use crate::types::{SignatureRow, RecoveredKeyRow};
 
 /// Attempts to recover the private key using the ECDSA reused-k attack
@@ -47,20 +47,23 @@ pub fn attempt_recover_k_and_priv(
     let s_diff = s1 - s2;
 
     // Calculate the inverse of the S difference - handle CtOption properly
-    let s_diff_inv = match s_diff.invert() {
-        Some(inv) => inv,
-        None => return Ok(None), // No inverse exists
-    };
+    let s_diff_inv = s_diff.invert();
+    if s_diff_inv.is_none().into() {
+        return Ok(None); // No inverse exists
+    }
+    let s_diff_inv = s_diff_inv.unwrap();
+
+    // Calculate the inverse of R1
+    let r_inv = r1.invert();
+    if r_inv.is_none().into() {
+        return Ok(None); // No inverse exists
+    }
+    let r_inv = r_inv.unwrap();
 
     // Calculate k = (z1 - z2) * (s1 - s2)^(-1) mod n
     let k = z_diff * s_diff_inv;
 
     // Calculate the private key: priv = (s1 * k - z1) * r^(-1) mod n
-    let r_inv = match r1.invert() {
-        Some(inv) => inv,
-        None => return Ok(None), // No inverse exists
-    };
-
     let priv_key = (s1 * k - z1) * r_inv;
 
     // Convert private key to WIF format
@@ -84,7 +87,7 @@ fn parse_hex_to_scalar(hex_str: &str) -> Result<Scalar> {
     buf.copy_from_slice(&bytes);
     
     Scalar::from_repr(buf.into())
-        .ok_or_else(|| anyhow!("Invalid scalar value"))
+        .or_else(|| anyhow!("Invalid scalar value"))
 }
 
 fn scalar_to_wif(scalar: &Scalar) -> Result<String> {
@@ -99,8 +102,8 @@ fn scalar_to_wif(scalar: &Scalar) -> Result<String> {
     wif_bytes.push(0x01);
     
     // Double SHA256 hash
-    let hash1 = sha2::Sha256::digest(&wif_bytes);
-    let hash2 = sha2::Sha256::digest(&hash1);
+    let hash1 = Sha256::digest(&wif_bytes);
+    let hash2 = Sha256::digest(&hash1);
     
     // Add first 4 bytes of double hash as checksum
     wif_bytes.extend_from_slice(&hash2[..4]);

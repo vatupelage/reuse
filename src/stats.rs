@@ -1,6 +1,5 @@
-use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
-use tracing::info;
+use indicatif::ProgressBar;
 
 #[derive(Debug)]
 pub struct RuntimeStats {
