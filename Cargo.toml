@@ -3,6 +3,10 @@ name = "btc_scanner"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "btc_scanner"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0"
 bitcoin = "0.30"
