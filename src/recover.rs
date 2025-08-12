@@ -37,32 +37,14 @@ pub fn attempt_recover_k_and_priv(
 
     // Calculate the difference in Z values using modular arithmetic
     // Note: We can't directly compare Scalars, so we'll use subtraction and handle the result
-    let z_diff = if z1 >= z2 {
-        z1 - z2
-    } else {
-        // If z1 < z2, we need to handle the modular arithmetic properly
-        // In secp256k1, we can add the curve order to make it positive
-        let curve_order = Scalar::from_repr([
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-            0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
-            0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41
-        ].into()).unwrap();
-        z2 - z1 + curve_order
-    };
-
+    // Instead of direct comparison, subtract and check if result is zero
+    let z_diff = z1 - z2;
+    
     // Calculate the difference in S values using modular arithmetic
-    let s_diff = if s1 >= s2 {
-        s1 - s2
-    } else {
-        let curve_order = Scalar::from_repr([
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-            0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
-            0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41
-        ].into()).unwrap();
-        s2 - s1 + curve_order
-    };
+    // If the result would be negative in normal arithmetic, 
+    // the modular subtraction automatically handles it correctly
+    // No need for manual comparison
+    let s_diff = s1 - s2;
 
     // Calculate the inverse of the S difference - handle CtOption properly
     let s_diff_inv = match s_diff.invert() {
