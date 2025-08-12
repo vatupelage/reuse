@@ -86,7 +86,7 @@ fn parse_hex_to_scalar(hex_str: &str) -> Result<Scalar> {
     buf.copy_from_slice(&bytes);
     
     Scalar::from_repr_vartime(buf.into())
-        .or_else(|| anyhow!("Invalid scalar value"))
+        .ok_or_else(|| anyhow!("Invalid scalar value"))
 }
 
 fn scalar_to_wif(scalar: &Scalar) -> Result<String> {

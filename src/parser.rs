@@ -5,6 +5,7 @@ use bitcoin::{
     blockdata::script::Instruction,
     Address, Network,
     sighash::{SighashCache, EcdsaSighashType},  // Fixed: correct Bitcoin 0.30 imports
+    bitcoin_hashes::Hash,  // Added: for to_byte_array method
 };
 use k256::ecdsa::Signature as K256Signature;
 use tracing;
