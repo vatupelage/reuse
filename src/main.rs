@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use clap::Parser;
 use tracing::{info, error, Level};
@@ -19,7 +17,7 @@ use cache::RValueCache;
 use rpc::RpcClient;
 use stats::RuntimeStats;
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "btc_scanner")]
 #[command(about = "High-performance Bitcoin ECDSA vulnerability scanner")]
 struct Cli {

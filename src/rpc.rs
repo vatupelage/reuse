@@ -10,29 +10,6 @@ use crate::types::RawBlock;
 pub struct RpcClient {
     http: Client,
     url: String,
-    rate_limit_per_sec: u32,
-    block_cache: BlockCache,
-}
-
-#[derive(Debug)]
-struct BlockCache {
-    cache: HashMap<u32, RawBlock>,
-}
-
-impl BlockCache {
-    fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-
-    fn get(&self, height: u32) -> Option<&RawBlock> {
-        self.cache.get(&height)
-    }
-
-    fn insert(&mut self, height: u32, block: RawBlock) {
-        self.cache.insert(height, block);
-    }
 }
 
 impl RpcClient {
@@ -44,8 +21,6 @@ impl RpcClient {
         Ok(Self {
             http,
             url: url.to_string(),
-            rate_limit_per_sec: 10, // Default rate limit
-            block_cache: BlockCache::new(),
         })
     }
 
@@ -172,12 +147,9 @@ struct JsonRpcRequest {
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse<T> {
     result: Option<T>,
-    error: Option<RpcError>,
-    id: i64,
 }
 
 #[derive(Debug, Deserialize)]
 struct RpcError {
-    code: i32,
-    message: String,
+    // Fields removed as they're not used
 }
