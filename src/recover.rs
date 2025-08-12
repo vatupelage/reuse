@@ -4,6 +4,7 @@ use num_bigint::BigUint;
 use num_traits::{One, Zero, ToPrimitive};
 use num_integer::Integer;
 use sha2::{Sha256, Digest};
+use std::str::FromStr;
 use crate::types::{SignatureRow, RecoveredKeyRow};
 
 pub fn attempt_recover_k_and_priv(sig1: &SignatureRow, sig2: &SignatureRow) -> Option<RecoveredKeyRow> {
@@ -21,7 +22,7 @@ pub fn attempt_recover_k_and_priv(sig1: &SignatureRow, sig2: &SignatureRow) -> O
     let z1_scalar = scalar_from_biguint(&z1)?;
     let z2_scalar = scalar_from_biguint(&z2)?;
 
-    // secp256k1 curve order n
+    // secp256k1 curve order n (correct values)
     let n = Scalar::from_repr(
         k256::FieldBytes::from_slice(&[
             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,

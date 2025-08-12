@@ -59,7 +59,7 @@ impl RpcClient {
             .map(|&height| JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 method: "getblockhash".to_string(),
-                params: vec![height],
+                params: vec![serde_json::Value::Number(height.into())],
                 id: height as i64,
             })
             .collect();
@@ -79,27 +79,30 @@ impl RpcClient {
         // Fetch raw blocks using hashes
         let block_requests: Vec<JsonRpcRequest> = block_hashes
             .iter()
-            .map(|hash| JsonRpcRequest {
+            .enumerate()
+            .map(|(i, hash)| JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 method: "getblock".to_string(),
-                params: vec![hash, 0], // 0 = raw hex format
-                id: 1,
+                params: vec![
+                    serde_json::Value::String(hash.clone()),
+                    serde_json::Value::Number(0.into()) // 0 = raw hex format
+                ],
+                id: i as i64,
             })
             .collect();
 
         let blocks_response = self.batch_call(&block_requests).await?;
         
-        // Extract raw blocks
+        // Parse raw hex response (not JSON object) - getblock with verbosity=0 returns raw hex string
         for (i, response) in blocks_response.iter().enumerate() {
             if let Some(result) = &response.result {
-                if let Some(block_data) = result.get("hex") {
-                    if let Some(hex_str) = block_data.as_str() {
-                        let block = RawBlock {
-                            height: start_height + i as u32,
-                            hex: hex_str.to_string(),
-                        };
-                        blocks.push(block);
-                    }
+                // getblock with verbosity=0 returns the raw hex string directly, not a nested object
+                if let Some(hex_str) = result.as_str() {
+                    let block = RawBlock {
+                        height: start_height + i as u32,
+                        hex: hex_str.to_string(),
+                    };
+                    blocks.push(block);
                 }
             }
         }
