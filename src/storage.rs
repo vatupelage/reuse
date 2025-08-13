@@ -43,18 +43,15 @@ impl Database {
             
             CREATE TABLE IF NOT EXISTS recovered_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                txid1 TEXT NOT NULL,
+                txid2 TEXT NOT NULL,
+                r TEXT NOT NULL,
                 private_key TEXT NOT NULL,
-                public_key TEXT NOT NULL,
-                address TEXT NOT NULL,
-                tx_hash1 TEXT NOT NULL,
-                tx_hash2 TEXT NOT NULL,
-                block_height1 INTEGER NOT NULL,
-                block_height2 INTEGER NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             
-            CREATE INDEX IF NOT EXISTS idx_recovered_keys_address ON recovered_keys(address);
-            CREATE INDEX IF NOT EXISTS idx_recovered_keys_tx_hash ON recovered_keys(tx_hash1, tx_hash2);
+            CREATE INDEX IF NOT EXISTS idx_recovered_keys_r ON recovered_keys(r);
+            CREATE INDEX IF NOT EXISTS idx_recovered_keys_txid ON recovered_keys(txid1, txid2);
             
             CREATE TABLE IF NOT EXISTS script_analysis (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,8 +113,8 @@ impl Database {
 
     pub fn insert_recovered_key(&mut self, key: &RecoveredKeyRow) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO recovered_keys (private_key, public_key, address, tx_hash1, tx_hash2, block_height1, block_height2) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![key.private_key, key.public_key, key.address, key.txid1, key.txid2, key.block_height1, key.block_height2],
+            "INSERT INTO recovered_keys (txid1, txid2, r, private_key) VALUES (?, ?, ?, ?)",
+            params![key.txid1, key.txid2, key.r, key.private_key],
         )?;
         Ok(())
     }
@@ -143,7 +140,7 @@ impl Database {
             };
 
             Ok(SignatureRow {
-                txid: row.get(0)?,
+                txid: row.get(0)?, // tx_hash maps to txid
                 block_height: row.get(1)?,
                 address: row.get(2)?,
                 pubkey: row.get(3)?,
