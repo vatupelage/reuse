@@ -1,15 +1,18 @@
 use anyhow::{anyhow, Result};
 use bitcoin::{
-    Block, Transaction, TxIn, Script, EcdsaSighashType, SighashCache,
+    Block, Transaction, TxIn, Script, PublicKey, Address, Network,
     consensus::deserialize,
+    sighash::{EcdsaSighashType, SighashCache}, // Correct import path
+    blockdata::script::Instruction,             // Correct import path
 };
-use bitcoin_hashes::Hash;  // Import Hash trait directly from bitcoin_hashes
+use bitcoin_hashes::Hash;
 use k256::ecdsa::Signature as K256Signature;
 use tracing;
-use crate::types::{SignatureRow, ScriptType, RawBlock};
+use crate::types::{SignatureRow, ScriptType, RawBlock, ParsedBlock}; // Added ParsedBlock
 use crate::rpc::RpcClient;
 use std::collections::{HashMap, HashSet};
 use futures::future;
+use hex;
 
 pub async fn parse_block(
     raw_block: &RawBlock,
@@ -18,16 +21,18 @@ pub async fn parse_block(
     let block: Block = deserialize(&hex::decode(&raw_block.hex)?)?;
     
     let mut signatures = Vec::new();
-    let mut script_stats = std::collections::HashMap::new();
+    let mut script_stats = HashMap::new();
     
     // Build transaction cache for this block
-    let mut tx_cache = std::collections::HashMap::new();
+    let mut tx_cache = HashMap::new();
     
     // First pass: collect all transaction IDs that we need for Z-value calculation
-    let mut required_txids = std::collections::HashSet::new();
+    let mut required_txids = HashSet::new();
     for tx in &block.txdata {
         for input in &tx.input {
-            required_txids.insert(input.previous_output.txid);
+            if !input.previous_output.is_null() {
+                required_txids.insert(input.previous_output.txid);
+            }
         }
     }
     
@@ -48,7 +53,7 @@ pub async fn parse_block(
     }
     
     // Wait for all transactions to be fetched
-    let fetched_txs: Vec<_> = futures::future::join_all(fetch_futures).await;
+    let fetched_txs: Vec<_> = future::join_all(fetch_futures).await;
     for result in fetched_txs {
         if let Some((txid, tx)) = result {
             tx_cache.insert(txid, tx);
@@ -124,7 +129,7 @@ fn calculate_message_hash_with_cache(
     input_index: usize, 
     input: &TxIn,
     sighash_type: u8,
-    tx_cache: &std::collections::HashMap<bitcoin::Txid, Transaction>
+    tx_cache: &HashMap<bitcoin::Txid, Transaction>
 ) -> Result<[u8; 32]> {
     // Try to get the previous transaction from cache
     if let Some(prev_tx) = tx_cache.get(&input.previous_output.txid) {

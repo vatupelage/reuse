@@ -307,7 +307,7 @@ impl Database {
     }
     
     pub fn get_last_checkpoint(&self) -> Result<Option<u32>> {
-        let result: Result<u32> = self.conn.query_row(
+        let result = self.conn.query_row(
             "SELECT last_processed_block FROM checkpoints WHERE id = 1",
             [],
             |row| row.get(0)

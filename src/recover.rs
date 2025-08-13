@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use k256::{
     Scalar,
     elliptic_curve::PrimeField,
-    SecretKey,
 };
 use num_bigint::{BigUint, ToBigUint};
 use num_traits::{Zero, ToPrimitive};
@@ -96,12 +95,14 @@ pub fn attempt_recover_k_and_priv(
 }
 
 fn derive_pubkey_from_private(private_key: &Scalar) -> Result<k256::PublicKey> {
-    // Convert scalar to secret key
-    let secret_key = k256::SecretKey::from_slice(&private_key.to_bytes())
-        .map_err(|e| anyhow!("Invalid private key: {}", e))?;
+    // Convert scalar to NonZeroScalar for k256
+    use k256::elliptic_curve::scalar::NonZeroScalar;
     
-    // Derive public key from secret key
-    let public_key = k256::PublicKey::from_secret_key(&secret_key);
+    let non_zero_scalar = NonZeroScalar::<k256::Secp256k1>::from_repr(private_key.to_bytes())
+        .ok_or_else(|| anyhow!("Invalid private key: zero or out of range"))?;
+    
+    // Derive public key from NonZeroScalar
+    let public_key = k256::PublicKey::from_secret_scalar(&non_zero_scalar);
     
     Ok(public_key)
 }
