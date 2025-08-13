@@ -11,7 +11,6 @@ use tracing;
 use crate::types::{SignatureRow, ScriptType, RawBlock, ParsedBlock}; // Added ParsedBlock
 use crate::rpc::RpcClient;
 use std::collections::{HashMap, HashSet};
-use futures::future;
 use hex;
 use tokio::time;
 
@@ -24,9 +23,6 @@ pub async fn parse_block(
     let mut signatures = Vec::new();
     let mut script_stats = HashMap::new();
     
-    // Build transaction cache for this block
-    let mut tx_cache = HashMap::new();
-    
     // First pass: collect all transaction IDs that we need for Z-value calculation
     let mut required_txids = HashSet::new();
     for tx in &block.txdata {
@@ -38,7 +34,7 @@ pub async fn parse_block(
     }
     
     // Fetch all required transactions with configurable rate limiting
-    let mut tx_cache = HashMap::new();
+    let mut tx_cache: HashMap<bitcoin::Txid, Transaction> = HashMap::new();
     
     // Rate limiting configuration
     let batch_size = 3; // Process 3 transactions at a time
