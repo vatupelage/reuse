@@ -11,22 +11,116 @@ impl Database {
     pub fn open(path: &str) -> Result<Self> {
         eprintln!("Opening database at: {}", path);
         
-        let conn = Connection::open(path)?;
-        eprintln!("Database connection established successfully");
+        // Check if database file already exists
+        let db_exists = std::path::Path::new(path).exists();
+        if db_exists {
+            eprintln!("Database file already exists, checking compatibility...");
+            
+            // Check if we can read the file
+            match std::fs::metadata(path) {
+                Ok(metadata) => {
+                    eprintln!("Database file size: {} bytes", metadata.len());
+                    eprintln!("Database file permissions: {:?}", metadata.permissions());
+                },
+                Err(e) => {
+                    eprintln!("Warning: Could not read database file metadata: {}", e);
+                }
+            }
+        } else {
+            eprintln!("Creating new database file...");
+        }
         
-        // Set SQLite pragmas for better performance
-        conn.execute("PRAGMA journal_mode = WAL", [])?;
-        conn.execute("PRAGMA synchronous = NORMAL", [])?;
-        conn.execute("PRAGMA cache_size = 10000", [])?;
-        conn.execute("PRAGMA temp_store = MEMORY", [])?;
-        eprintln!("Database pragmas set successfully");
+        // Ensure the directory exists
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.exists() {
+                eprintln!("Creating database directory: {:?}", parent);
+                std::fs::create_dir_all(parent)?;
+            }
+            
+            // Test if the directory is writable
+            let test_file = parent.join(".test_write");
+            match std::fs::write(&test_file, "test") {
+                Ok(_) => {
+                    std::fs::remove_file(&test_file).ok(); // Clean up test file
+                    eprintln!("Database directory is writable");
+                },
+                Err(e) => {
+                    eprintln!("Error: Database directory is not writable: {}", e);
+                    return Err(anyhow::anyhow!("Database directory is not writable: {}", e));
+                }
+            }
+        }
+        
+        // Try to open the database connection
+        let conn = match Connection::open(path) {
+            Ok(conn) => {
+                eprintln!("Database connection established successfully");
+                conn
+            },
+            Err(e) => {
+                eprintln!("Failed to open database at {}: {}", path, e);
+                return Err(e.into());
+            }
+        };
+        
+        // Set SQLite pragmas for better performance - use execute_batch to avoid "Execute returned results" error
+        let pragma_sql = r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA cache_size = 10000;
+            PRAGMA temp_store = MEMORY;
+        "#;
+        
+        match conn.execute_batch(pragma_sql) {
+            Ok(_) => eprintln!("Database pragmas set successfully"),
+            Err(e) => {
+                eprintln!("Warning: Failed to set database pragmas: {}", e);
+                // Continue anyway, the database might work without these optimizations
+            }
+        }
         
         let db = Self { conn };
+        
+        // Test the database connection with a simple query
+        eprintln!("Testing database connection...");
+        match db.conn.execute("SELECT 1", []) {
+            Ok(_) => eprintln!("Database connection test successful"),
+            Err(e) => {
+                eprintln!("Warning: Database connection test failed: {}", e);
+                // Continue anyway, might be a schema issue
+            }
+        }
         
         // Always try to initialize schema (CREATE TABLE IF NOT EXISTS will handle existing tables)
         eprintln!("Initializing database schema...");
         if let Err(e) = db.init_schema() {
             eprintln!("Warning: Failed to initialize database schema: {}", e);
+            
+            // If the database exists but schema initialization fails, try to recreate it
+            if db_exists {
+                eprintln!("Attempting to recreate database due to schema incompatibility...");
+                drop(db); // Close the connection
+                
+                // Remove the old database file
+                if let Err(remove_err) = std::fs::remove_file(path) {
+                    eprintln!("Warning: Failed to remove old database: {}", remove_err);
+                }
+                
+                // Try to open a new connection
+                let conn = Connection::open(path)?;
+                let db = Self { conn };
+                
+                // Initialize schema on the new database
+                if let Err(e) = db.init_schema() {
+                    eprintln!("Failed to initialize schema on new database: {}", e);
+                    return Err(e.into());
+                } else {
+                    eprintln!("Database recreated and schema initialized successfully");
+                }
+                
+                return Ok(db);
+            }
+            
             // Continue anyway, the database might already have the correct schema
         } else {
             eprintln!("Database schema initialized successfully");
