@@ -2,7 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::{info, error, Level};
 use tracing_subscriber;
-use futures::stream::StreamExt;
+use bitcoin::consensus::deserialize;
+use hex;
 
 mod types;
 mod storage;
@@ -12,7 +13,7 @@ mod parser;
 mod recover;
 mod stats;
 
-use types::{ScannerConfig, ParsedBlock};
+use types::ScannerConfig;
 use storage::Database;
 use cache::RValueCache;
 use rpc::RpcClient;
@@ -151,6 +152,8 @@ async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCac
             
             stats.blocks_processed += 1;
             // FIXED: Count actual transactions in the block, not signatures
+            // We need to get transaction count from the raw block data
+            let block: bitcoin::Block = deserialize(&hex::decode(&block.hex)?)?;
             stats.transactions_processed += block.txdata.len() as u64;
             stats.signatures_processed += parsed_block.signatures.len() as u64;
         }
