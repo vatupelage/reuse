@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use rusqlite::{Connection, params};
 use crate::types::{SignatureRow, RecoveredKeyRow, ScriptType};
 use std::collections::HashMap;
@@ -84,7 +84,7 @@ impl Database {
         
         // Test the database connection with a simple query
         eprintln!("Testing database connection...");
-        match db.conn.lock()?.query_row("SELECT 1", [], |_row| Ok(())) {
+        match db.conn.lock().query_row("SELECT 1", [], |_row| Ok(())) {
             Ok(_) => eprintln!("Database connection test successful"),
             Err(e) => {
                 eprintln!("Warning: Database connection test failed: {}", e);
@@ -98,58 +98,32 @@ impl Database {
             eprintln!("Warning: Failed to initialize database schema: {}", e);
             
             // If the database exists but schema initialization fails, try to recreate it
-            if db_exists {
-                eprintln!("Attempting to recreate database due to schema incompatibility...");
-                drop(db); // Close the connection
-                
-                // Remove the old database file
-                if let Err(remove_err) = std::fs::remove_file(path) {
-                    eprintln!("Warning: Failed to remove old database: {}", remove_err);
-                }
-                
-                // Try to open a new connection
-                let conn = Connection::open(path)?;
-                let db = Self { conn: Mutex::new(conn) };
-                
-                // Initialize schema on the new database
-                if let Err(e) = db.init_schema() {
-                    eprintln!("Failed to initialize schema on new database: {}", e);
-                    return Err(e.into());
-                } else {
-                    eprintln!("Database recreated and schema initialized successfully");
-                }
-                
-                return Ok(db);
-            }
-            
-            // Continue anyway, the database might already have the correct schema
-        } else {
-            eprintln!("Database schema initialized successfully");
+            eprintln!("Attempting to recreate database...");
+            std::fs::remove_file(path)?;
+            let conn = Connection::open(path)?;
+            let db = Self { conn: Mutex::new(conn) };
+            db.init_schema()?;
+            return Ok(db);
         }
         
         Ok(db)
     }
 
-    pub fn init_schema(&self) -> Result<()> {
-        // Create tables and indexes in a single batch
+    fn init_schema(&self) -> Result<()> {
         let schema_sql = r#"
             CREATE TABLE IF NOT EXISTS signatures (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                txid TEXT NOT NULL,
                 block_height INTEGER NOT NULL,
-                tx_hash TEXT NOT NULL,
                 input_index INTEGER NOT NULL,
+                address TEXT NOT NULL,
+                pubkey TEXT NOT NULL,
                 r TEXT NOT NULL,
                 s TEXT NOT NULL,
                 z TEXT NOT NULL,
-                pubkey TEXT NOT NULL,
-                address TEXT NOT NULL,
                 script_type TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-            
-            CREATE INDEX IF NOT EXISTS idx_signatures_r ON signatures(r);
-            CREATE INDEX IF NOT EXISTS idx_signatures_block_height ON signatures(block_height);
-            CREATE INDEX IF NOT EXISTS idx_signatures_tx_hash ON signatures(tx_hash);
             
             CREATE TABLE IF NOT EXISTS recovered_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,167 +131,149 @@ impl Database {
                 txid2 TEXT NOT NULL,
                 r TEXT NOT NULL,
                 private_key TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             
-            CREATE INDEX IF NOT EXISTS idx_recovered_keys_r ON recovered_keys(r);
-            CREATE INDEX IF NOT EXISTS idx_recovered_keys_txid ON recovered_keys(txid1, txid2);
-            
-            CREATE TABLE IF NOT EXISTS script_analysis (
+            CREATE TABLE IF NOT EXISTS script_stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                script_type TEXT NOT NULL UNIQUE,
+                script_type TEXT UNIQUE NOT NULL,
                 count INTEGER NOT NULL DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             
             CREATE TABLE IF NOT EXISTS checkpoints (
-                id INTEGER PRIMARY KEY,
-                last_processed_block INTEGER NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_height INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            
+            CREATE INDEX IF NOT EXISTS idx_signatures_txid ON signatures(txid);
+            CREATE INDEX IF NOT EXISTS idx_signatures_block_height ON signatures(block_height);
+            CREATE INDEX IF NOT EXISTS idx_signatures_r ON signatures(r);
+            CREATE INDEX IF NOT EXISTS idx_recovered_keys_r ON recovered_keys(r);
         "#;
         
-        // Execute schema creation with better error handling
-        match self.conn.lock()?.execute_batch(schema_sql) {
+        match self.conn.lock().execute_batch(schema_sql) {
             Ok(_) => Ok(()),
-            Err(e) => {
-                eprintln!("Database schema creation failed: {}", e);
-                eprintln!("Schema SQL: {}", schema_sql);
-                Err(e.into())
-            }
+            Err(e) => Err(e.into())
         }
     }
 
     pub fn insert_signatures_batch(&self, signatures: &[SignatureRow]) -> Result<()> {
-        let mut tx = self.conn.lock()?.transaction()?;
-
+        let mut tx = self.conn.lock().transaction()?;
+        
         let mut stmt = tx.prepare(
-            "INSERT INTO signatures (block_height, tx_hash, input_index, r, s, z, pubkey, address, script_type, created_at) 
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)"
+            "INSERT INTO signatures (txid, block_height, input_index, address, pubkey, r, s, z, script_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )?;
-
+        
         for sig in signatures {
-            stmt.execute((
+            stmt.execute(params![
+                sig.txid,
                 sig.block_height,
-                &sig.txid, // Using txid from SignatureRow as tx_hash
-                sig.input_index, // FIXED: Use actual input_index instead of hardcoded 0
-                &sig.r,
-                &sig.s,
-                &sig.z,
-                &sig.pubkey,
-                &sig.address,
-                format!("{:?}", sig.script_type),
-            ))?;
+                sig.input_index,
+                sig.address,
+                sig.pubkey,
+                sig.r,
+                sig.s,
+                sig.z,
+                sig.script_type.to_string()
+            ])?;
         }
-
-        // Drop the statement before committing
-        drop(stmt);
+        
         tx.commit()?;
         Ok(())
     }
 
-    pub fn upsert_script_stats_batch(&self, script_stats: &HashMap<ScriptType, u64>) -> Result<()> {
-        // Fixed: Connection doesn't need locking, it's already single-threaded
-        
+    pub fn upsert_script_stats_batch(&self, script_stats: &HashMap<ScriptType, u32>) -> Result<()> {
         for (script_type, count) in script_stats {
             let script_type_str = format!("{:?}", script_type);
             
-            // First try to update existing record
-            let updated = self.conn.lock()?.execute(
-                "UPDATE script_analysis SET count = ?, updated_at = CURRENT_TIMESTAMP WHERE script_type = ?",
-                (count, script_type_str.clone()),
+            // Try to update existing record first
+            let updated = self.conn.lock().execute(
+                "UPDATE script_stats SET count = count + ?, updated_at = CURRENT_TIMESTAMP WHERE script_type = ?",
+                params![count, script_type_str]
             )?;
             
             // If no rows were updated, insert new record
             if updated == 0 {
-                self.conn.lock()?.execute(
-                    "INSERT INTO script_analysis (script_type, count, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    (script_type_str, count),
+                self.conn.lock().execute(
+                    "INSERT INTO script_stats (script_type, count) VALUES (?, ?)",
+                    params![script_type_str, count]
                 )?;
             }
         }
-        
         Ok(())
     }
 
-    pub fn insert_recovered_key(&self, key: &RecoveredKeyRow) -> Result<()> {
-        self.conn.lock()?.execute(
+    pub fn insert_recovered_key(&self, recovered_key: &RecoveredKeyRow) -> Result<()> {
+        self.conn.lock().execute(
             "INSERT INTO recovered_keys (txid1, txid2, r, private_key) VALUES (?, ?, ?, ?)",
-            params![key.txid1, key.txid2, key.r, key.private_key],
+            params![
+                recovered_key.txid1,
+                recovered_key.txid2,
+                recovered_key.r,
+                recovered_key.private_key
+            ]
         )?;
         Ok(())
     }
 
     pub fn preload_recent_r_values(&self, limit: usize) -> Result<Vec<SignatureRow>> {
-        let mut stmt = self.conn.lock()?.prepare(
-            "SELECT tx_hash, block_height, input_index, address, pubkey, r, s, z, script_type 
-             FROM signatures 
-             ORDER BY block_height DESC, id DESC 
-             LIMIT ?"
+        let mut stmt = self.conn.lock().prepare(
+            "SELECT txid, block_height, input_index, address, pubkey, r, s, z, script_type FROM signatures ORDER BY id DESC LIMIT ?"
         )?;
-
-        let rows = stmt.query_map(params![limit], |row| {
-            let script_type_str: String = row.get(8)?; // Updated index for script_type
-            let script_type = match script_type_str.as_str() {
-                "P2PKH" => ScriptType::P2PKH,
-                "P2SH" => ScriptType::P2SH,
-                "P2WPKH" => ScriptType::P2WPKH,
-                "P2WSH" => ScriptType::P2WSH,
-                "P2PK" => ScriptType::P2PK,
-                "Multisig" => ScriptType::Multisig,
-                _ => ScriptType::NonStandard,
-            };
-
+        
+        let rows = stmt.query_map([limit], |row| {
             Ok(SignatureRow {
-                txid: row.get(0)?, // tx_hash maps to txid
+                txid: row.get(0)?,
                 block_height: row.get(1)?,
-                input_index: row.get(2)?, // Added: Include input_index
+                input_index: row.get(2)?,
                 address: row.get(3)?,
                 pubkey: row.get(4)?,
                 r: row.get(5)?,
                 s: row.get(6)?,
                 z: row.get(7)?,
-                script_type,
+                script_type: row.get(8)?,
             })
         })?;
-
+        
         let mut signatures = Vec::new();
         for row in rows {
             signatures.push(row?);
         }
-
+        
         Ok(signatures)
     }
 
     pub fn get_signature_count(&self) -> Result<u64> {
-        let count: u64 = self.conn.lock()?.query_row("SELECT COUNT(*) FROM signatures", [], |row| row.get(0))?;
+        let count: u64 = self.conn.lock().query_row("SELECT COUNT(*) FROM signatures", [], |row| row.get(0))?;
         Ok(count)
     }
 
     pub fn get_recovered_key_count(&self) -> Result<u64> {
-        let count: u64 = self.conn.lock()?.query_row("SELECT COUNT(*) FROM recovered_keys", [], |row| row.get(0))?;
+        let count: u64 = self.conn.lock().query_row("SELECT COUNT(*) FROM recovered_keys", [], |row| row.get(0))?;
         Ok(count)
     }
     
     pub fn save_checkpoint(&self, block_height: u32) -> Result<()> {
-        self.conn.lock()?.execute(
-            "INSERT OR REPLACE INTO checkpoints (id, last_processed_block, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)",
-            params![block_height],
+        self.conn.lock().execute(
+            "INSERT INTO checkpoints (block_height) VALUES (?)",
+            params![block_height]
         )?;
         Ok(())
     }
     
     pub fn get_last_checkpoint(&self) -> Result<Option<u32>> {
-        let result = self.conn.lock()?.query_row(
-            "SELECT last_processed_block FROM checkpoints WHERE id = 1",
+        let result = self.conn.lock().query_row(
+            "SELECT block_height FROM checkpoints ORDER BY id DESC LIMIT 1",
             [],
             |row| row.get(0)
         );
         
         match result {
-            Ok(block_height) => Ok(Some(block_height)),
-            Err(_) => Ok(None), // No checkpoint found
+            Ok(height) => Ok(Some(height)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into())
         }
     }
 }

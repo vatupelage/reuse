@@ -8,7 +8,7 @@ use crate::types::{SignatureRow, RecoveredKeyRow};
 use hex;
 use bs58;
 use k256::ecdsa::signature::{Signer, Verifier};
-use k256::ecdsa::{SigningKey, VerifyingKey};
+use k256::ecdsa::SigningKey;
 
 /// Attempts to recover the private key using the ECDSA reused-k attack
 /// This attack works when the same k value is used in two different signatures
@@ -84,7 +84,9 @@ pub fn attempt_recover_k_and_priv(
         .sign(&test_hash);
     
     // Verify signature with recovered public key
-    let verification_result = recovered_pubkey.verify(&test_hash, &test_signature);
+    let verification_result = k256::ecdsa::VerifyingKey::from_sec1_bytes(&recovered_pubkey.to_sec1_bytes())
+        .map_err(|e| anyhow!("Invalid public key for verification: {}", e))?
+        .verify(&test_hash, &test_signature);
     if verification_result.is_err() {
         tracing::warn!("Private key signature verification failed for R-value {}: {:?}", 
             sig1.r, verification_result.err());
