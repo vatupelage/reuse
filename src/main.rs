@@ -150,7 +150,8 @@ async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCac
             db.upsert_script_stats_batch(&parsed_block.script_stats)?;
             
             stats.blocks_processed += 1;
-            stats.transactions_processed += parsed_block.signatures.len() as u64;
+            // FIXED: Count actual transactions in the block, not signatures
+            stats.transactions_processed += block.txdata.len() as u64;
             stats.signatures_processed += parsed_block.signatures.len() as u64;
         }
         
