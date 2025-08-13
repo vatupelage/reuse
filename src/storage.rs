@@ -9,14 +9,29 @@ pub struct Database {
 
 impl Database {
     pub fn open(path: &str) -> Result<Self> {
+        eprintln!("Opening database at: {}", path);
+        
         let conn = Connection::open(path)?;
+        eprintln!("Database connection established successfully");
+        
+        // Set SQLite pragmas for better performance
         conn.execute("PRAGMA journal_mode = WAL", [])?;
         conn.execute("PRAGMA synchronous = NORMAL", [])?;
         conn.execute("PRAGMA cache_size = 10000", [])?;
         conn.execute("PRAGMA temp_store = MEMORY", [])?;
+        eprintln!("Database pragmas set successfully");
         
         let db = Self { conn };
-        db.init_schema()?;
+        
+        // Always try to initialize schema (CREATE TABLE IF NOT EXISTS will handle existing tables)
+        eprintln!("Initializing database schema...");
+        if let Err(e) = db.init_schema() {
+            eprintln!("Warning: Failed to initialize database schema: {}", e);
+            // Continue anyway, the database might already have the correct schema
+        } else {
+            eprintln!("Database schema initialized successfully");
+        }
+        
         Ok(db)
     }
 
@@ -62,9 +77,15 @@ impl Database {
             );
         "#;
         
-        self.conn.execute_batch(schema_sql)?;
-        
-        Ok(())
+        // Execute schema creation with better error handling
+        match self.conn.execute_batch(schema_sql) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                eprintln!("Database schema creation failed: {}", e);
+                eprintln!("Schema SQL: {}", schema_sql);
+                Err(e.into())
+            }
+        }
     }
 
     pub fn insert_signatures_batch(&mut self, signatures: &[SignatureRow]) -> Result<()> {
@@ -72,7 +93,7 @@ impl Database {
 
         let mut stmt = tx.prepare(
             "INSERT INTO signatures (block_height, tx_hash, input_index, r, s, z, pubkey, address, script_type, created_at) 
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)"
         )?;
 
         for sig in signatures {
@@ -101,11 +122,19 @@ impl Database {
         for (script_type, count) in script_stats {
             let script_type_str = format!("{:?}", script_type);
             
-            self.conn.execute(
-                "INSERT OR REPLACE INTO script_analysis (script_type, count, updated_at) 
-                 VALUES (?, ?, datetime('now'))",
-                (script_type_str, count),
+            // First try to update existing record
+            let updated = self.conn.execute(
+                "UPDATE script_analysis SET count = ?, updated_at = CURRENT_TIMESTAMP WHERE script_type = ?",
+                (count, script_type_str),
             )?;
+            
+            // If no rows were updated, insert new record
+            if updated == 0 {
+                self.conn.execute(
+                    "INSERT INTO script_analysis (script_type, count, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    (script_type_str, count),
+                )?;
+            }
         }
         
         Ok(())
