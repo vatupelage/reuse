@@ -13,10 +13,36 @@ use crate::rpc::RpcClient;
 use std::collections::{HashMap, HashSet};
 use hex;
 use tokio::time;
+use std::time::Instant;
+
+// Rate limiter that actually uses the configured rate_limit parameter
+pub struct RateLimiter {
+    max_per_second: u32,
+    last_request: Instant,
+}
+
+impl RateLimiter {
+    pub fn new(max_per_second: u32) -> Self {
+        Self {
+            max_per_second,
+            last_request: Instant::now(),
+        }
+    }
+
+    pub async fn wait_if_needed(&mut self) {
+        let elapsed = self.last_request.elapsed();
+        let min_interval = time::Duration::from_millis(1000 / self.max_per_second as u64);
+        if elapsed < min_interval {
+            time::sleep(min_interval - elapsed).await;
+        }
+        self.last_request = Instant::now();
+    }
+}
 
 pub async fn parse_block(
     raw_block: &RawBlock,
     rpc: &RpcClient,
+    rate_limiter: &mut RateLimiter,
 ) -> Result<ParsedBlock> {
     let block: Block = deserialize(&hex::decode(&raw_block.hex)?)?;
     
@@ -33,38 +59,25 @@ pub async fn parse_block(
         }
     }
     
-    // Fetch all required transactions with configurable rate limiting
+    // Fetch all required transactions using the rate limiter
     let mut tx_cache: HashMap<bitcoin::Txid, Transaction> = HashMap::new();
     
-    // Rate limiting configuration
-    let batch_size = 3; // Process 3 transactions at a time
-    let delay_between_requests = 1000; // 1000ms = 1 second between individual requests
-    let delay_between_batches = 1000; // 1 second between batches
-    let retry_delay = 2000; // 2 seconds after rate limit
-    
-    let mut processed = 0;
-    
     for txid in &required_txids {
-        // Add delay between batches
-        if processed > 0 && processed % batch_size == 0 {
-            tracing::info!("Rate limiting: waiting {}ms between batches...", delay_between_batches);
-            time::sleep(std::time::Duration::from_millis(delay_between_batches)).await;
-        }
+        // Use the rate limiter to respect the configured rate limit
+        rate_limiter.wait_if_needed().await;
         
         match rpc.get_transaction(txid).await {
             Ok(tx) => {
                 tx_cache.insert(*txid, tx);
-                processed += 1;
             },
             Err(e) => {
                 if e.to_string().contains("429") {
-                    tracing::warn!("Rate limited for transaction {}, waiting {}ms...", txid, retry_delay);
-                    time::sleep(std::time::Duration::from_millis(retry_delay)).await;
+                    tracing::warn!("Rate limited for transaction {}, waiting 2 seconds...", txid);
+                    time::sleep(time::Duration::from_millis(2000)).await;
                     // Try again after waiting
                     match rpc.get_transaction(txid).await {
                         Ok(tx) => {
                             tx_cache.insert(*txid, tx);
-                            processed += 1;
                         },
                         Err(e2) => {
                             tracing::warn!("Failed to fetch transaction {} after retry: {}", txid, e2);
@@ -75,9 +88,6 @@ pub async fn parse_block(
                 }
             }
         }
-        
-        // Small delay between individual requests
-        time::sleep(std::time::Duration::from_millis(delay_between_requests)).await;
     }
     
     tracing::info!("Fetched {}/{} required transactions for block {}", 

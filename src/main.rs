@@ -17,6 +17,7 @@ use storage::Database;
 use cache::RValueCache;
 use rpc::RpcClient;
 use stats::RuntimeStats;
+use parser::RateLimiter;
 
 #[derive(Parser, Debug)]
 #[command(name = "btc_scanner")]
@@ -93,6 +94,9 @@ async fn main() -> Result<()> {
 async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCache, rpc: &RpcClient) -> Result<()> {
     let mut stats = RuntimeStats::start();
     
+    // Create a rate limiter based on the configured rate_limit
+    let mut rate_limiter = RateLimiter::new(config.rate_limit);
+    
     // Check for existing checkpoint to resume scanning
     let mut current_block = match db.get_last_checkpoint()? {
         Some(checkpoint) => {
@@ -118,24 +122,13 @@ async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCac
         let blocks = rpc.fetch_blocks_batch(current_block, end_block).await?;
         stats.api_requests += 1; // Count batch request
         
-        // Process blocks in parallel using the configured thread count
-        let mut block_futures = Vec::new();
+        // Process blocks sequentially to respect rate limiting
+        // This ensures we don't overwhelm the API with parallel requests
         for block in blocks {
-            let rpc = rpc.clone();
-            block_futures.push(async move {
-                parser::parse_block(&block, &rpc).await
-            });
-        }
-        
-        // Process blocks with controlled concurrency
-        let parsed_blocks: Vec<_> = futures::stream::iter(block_futures)
-            .buffer_unordered(config.threads)
-            .collect()
-            .await;
-        
-        // Process results sequentially to avoid database contention
-        for parsed_block in parsed_blocks {
-            let parsed_block = parsed_block?;
+            // Use the rate limiter before processing each block
+            rate_limiter.wait_if_needed().await;
+            
+            let parsed_block = parser::parse_block(&block, rpc, &mut rate_limiter).await?;
             
             // Process signatures and check for R-value reuse
             for signature in &parsed_block.signatures {
