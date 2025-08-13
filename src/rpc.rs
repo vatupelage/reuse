@@ -3,7 +3,6 @@ use bitcoin::{Transaction, Txid};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use std::collections::HashMap;
 use crate::types::RawBlock;
 
 #[derive(Debug)]

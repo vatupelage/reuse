@@ -20,57 +20,55 @@ impl Database {
         Ok(db)
     }
 
-    fn init_schema(&self) -> Result<()> {
-        // Create signatures table
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS signatures (
+    pub fn init_schema(&self) -> Result<()> {
+        let conn = self.conn.get()?;
+        
+        // Create tables and indexes in a single batch
+        let schema_sql = r#"
+            CREATE TABLE IF NOT EXISTS signatures (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                txid TEXT NOT NULL,
                 block_height INTEGER NOT NULL,
-                address TEXT NOT NULL,
-                pubkey TEXT NOT NULL,
+                tx_hash TEXT NOT NULL,
+                input_index INTEGER NOT NULL,
                 r TEXT NOT NULL,
                 s TEXT NOT NULL,
                 z TEXT NOT NULL,
+                pubkey TEXT NOT NULL,
+                address TEXT NOT NULL,
                 script_type TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-            [],
-        )?;
-
-        // Create recovered_keys table
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS recovered_keys (
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_signatures_r ON signatures(r);
+            CREATE INDEX IF NOT EXISTS idx_signatures_block_height ON signatures(block_height);
+            CREATE INDEX IF NOT EXISTS idx_signatures_tx_hash ON signatures(tx_hash);
+            
+            CREATE TABLE IF NOT EXISTS recovered_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                txid1 TEXT NOT NULL,
-                txid2 TEXT NOT NULL,
-                r TEXT NOT NULL,
                 private_key TEXT NOT NULL,
+                public_key TEXT NOT NULL,
+                address TEXT NOT NULL,
+                tx_hash1 TEXT NOT NULL,
+                tx_hash2 TEXT NOT NULL,
+                block_height1 INTEGER NOT NULL,
+                block_height2 INTEGER NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-            [],
-        )?;
-
-        // Create script_analysis table - Fixed schema to match code usage
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS script_analysis (
-                script_type TEXT PRIMARY KEY,
-                count INTEGER NOT NULL,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-            [],
-        )?;
-
-        // Create indexes for performance
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_r ON signatures(r)", [])?;
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_pubkey ON signatures(pubkey)", [])?;
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_address ON signatures(address)", [])?;
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_txid ON signatures(txid)", [])?;
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signatures_block_height ON signatures(block_height)", [])?;
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_recovered_keys_r ON recovered_keys(r)", [])?;
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_recovered_keys_txid1 ON recovered_keys(txid1)", [])?;
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_recovered_keys_txid2 ON recovered_keys(txid2)", [])?;
-
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_recovered_keys_address ON recovered_keys(address);
+            CREATE INDEX IF NOT EXISTS idx_recovered_keys_tx_hash ON recovered_keys(tx_hash1, tx_hash2);
+            
+            CREATE TABLE IF NOT EXISTS script_analysis (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                script_type TEXT NOT NULL UNIQUE,
+                count INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        "#;
+        
+        conn.execute_batch(schema_sql)?;
+        
         Ok(())
     }
 
