@@ -13,6 +13,7 @@ use crate::rpc::RpcClient;
 use std::collections::{HashMap, HashSet};
 use futures::future;
 use hex;
+use tokio::time;
 
 pub async fn parse_block(
     raw_block: &RawBlock,
@@ -36,32 +37,59 @@ pub async fn parse_block(
         }
     }
     
-    // Fetch all required transactions in parallel
-    let mut fetch_futures = Vec::new();
+    // Fetch all required transactions with configurable rate limiting
+    let mut tx_cache = HashMap::new();
+    
+    // Rate limiting configuration
+    let batch_size = 3; // Process 3 transactions at a time
+    let delay_between_requests = 200; // 200ms between individual requests
+    let delay_between_batches = 1000; // 1 second between batches
+    let retry_delay = 2000; // 2 seconds after rate limit
+    
+    let mut processed = 0;
+    
     for txid in &required_txids {
-        let rpc = rpc.clone();
-        let txid = *txid;
-        fetch_futures.push(async move {
-            match rpc.get_transaction(&txid).await {
-                Ok(tx) => Some((txid, tx)),
-                Err(e) => {
+        // Add delay between batches
+        if processed > 0 && processed % batch_size == 0 {
+            tracing::info!("Rate limiting: waiting {}ms between batches...", delay_between_batches);
+            time::sleep(std::time::Duration::from_millis(delay_between_batches)).await;
+        }
+        
+        match rpc.get_transaction(txid).await {
+            Ok(tx) => {
+                tx_cache.insert(*txid, tx);
+                processed += 1;
+            },
+            Err(e) => {
+                if e.to_string().contains("429") {
+                    tracing::warn!("Rate limited for transaction {}, waiting {}ms...", txid, retry_delay);
+                    time::sleep(std::time::Duration::from_millis(retry_delay)).await;
+                    // Try again after waiting
+                    match rpc.get_transaction(txid).await {
+                        Ok(tx) => {
+                            tx_cache.insert(*txid, tx);
+                            processed += 1;
+                        },
+                        Err(e2) => {
+                            tracing::warn!("Failed to fetch transaction {} after retry: {}", txid, e2);
+                        }
+                    }
+                } else {
                     tracing::warn!("Failed to fetch transaction {}: {}", txid, e);
-                    None
                 }
             }
-        });
-    }
-    
-    // Wait for all transactions to be fetched
-    let fetched_txs: Vec<_> = future::join_all(fetch_futures).await;
-    for result in fetched_txs {
-        if let Some((txid, tx)) = result {
-            tx_cache.insert(txid, tx);
         }
+        
+        // Small delay between individual requests
+        time::sleep(std::time::Duration::from_millis(delay_between_requests)).await;
     }
     
     tracing::info!("Fetched {}/{} required transactions for block {}", 
         tx_cache.len(), required_txids.len(), raw_block.height);
+    
+    if tx_cache.len() < required_txids.len() {
+        tracing::warn!("Some transactions could not be fetched due to rate limiting. Proceeding with available data.");
+    }
     
     // Second pass: process transactions and extract signatures
     for (tx_index, tx) in block.txdata.iter().enumerate() {
