@@ -110,9 +110,9 @@ async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCac
         }
     };
     
-    // Preload recent R-values from database
-    let recent_signatures = db.preload_recent_r_values(100_000)?;
-    cache.preload(recent_signatures);
+    // Preload cache with recent signatures
+    let recent_signatures = db.preload_recent_r_values(10000)?;
+    cache.preload(recent_signatures)?;
     
     while current_block <= config.end_block {
         let end_block = std::cmp::min(current_block + config.batch_size as u32 - 1, config.end_block);
@@ -129,7 +129,8 @@ async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCac
             // Use the rate limiter before processing each block
             rate_limiter.wait_if_needed().await;
             
-            let parsed_block = parser::parse_block(&block, rpc, &mut rate_limiter).await?;
+            // Process the block
+            let parsed_block = parser::parse_block(&block, &rpc, &rate_limiter).await?;
             
             // Process signatures and check for R-value reuse
             for signature in &parsed_block.signatures {
@@ -144,17 +145,15 @@ async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCac
                 }
             }
             
-            // Batch insert signatures
+            // Store signatures
             db.insert_signatures_batch(&parsed_block.signatures)?;
             
             // Update script statistics
             db.upsert_script_stats_batch(&parsed_block.script_stats)?;
             
+            // Update progress
             stats.blocks_processed += 1;
-            // FIXED: Count actual transactions in the block, not signatures
-            // We need to get transaction count from the raw block data
-            let block: bitcoin::Block = deserialize(&hex::decode(&block.hex)?)?;
-            stats.transactions_processed += block.txdata.len() as u64;
+            stats.transactions_processed += parsed_block.signatures.len() as u64;
             stats.signatures_processed += parsed_block.signatures.len() as u64;
         }
         

@@ -1,10 +1,12 @@
-use anyhow::Result;
-use rusqlite::{Connection, params};
-use crate::types::{SignatureRow, ScriptType, RecoveredKeyRow};
+use anyhow::{anyhow, Result};
+use rusqlite::{Connection, params, Row, Statement};
+use std::path::Path;
 use std::collections::HashMap;
+use crate::types::{SignatureRow, RecoveredKeyRow, ScriptType};
+use std::sync::Mutex;
 
 pub struct Database {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl Database {
@@ -79,11 +81,11 @@ impl Database {
             }
         }
         
-        let db = Self { conn };
+        let db = Self { conn: Mutex::new(conn) };
         
         // Test the database connection with a simple query
         eprintln!("Testing database connection...");
-        match db.conn.query_row("SELECT 1", [], |_row| Ok(())) {
+        match db.conn.lock()?.query_row("SELECT 1", [], |_row| Ok(())) {
             Ok(_) => eprintln!("Database connection test successful"),
             Err(e) => {
                 eprintln!("Warning: Database connection test failed: {}", e);
@@ -108,7 +110,7 @@ impl Database {
                 
                 // Try to open a new connection
                 let conn = Connection::open(path)?;
-                let db = Self { conn };
+                let db = Self { conn: Mutex::new(conn) };
                 
                 // Initialize schema on the new database
                 if let Err(e) = db.init_schema() {
@@ -178,7 +180,7 @@ impl Database {
         "#;
         
         // Execute schema creation with better error handling
-        match self.conn.execute_batch(schema_sql) {
+        match self.conn.lock()?.execute_batch(schema_sql) {
             Ok(_) => Ok(()),
             Err(e) => {
                 eprintln!("Database schema creation failed: {}", e);
@@ -188,8 +190,8 @@ impl Database {
         }
     }
 
-    pub fn insert_signatures_batch(&mut self, signatures: &[SignatureRow]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+    pub fn insert_signatures_batch(&self, signatures: &[SignatureRow]) -> Result<()> {
+        let mut tx = self.conn.lock()?.transaction()?;
 
         let mut stmt = tx.prepare(
             "INSERT INTO signatures (block_height, tx_hash, input_index, r, s, z, pubkey, address, script_type, created_at) 
@@ -216,21 +218,21 @@ impl Database {
         Ok(())
     }
 
-    pub fn upsert_script_stats_batch(&mut self, script_stats: &HashMap<ScriptType, u64>) -> Result<()> {
+    pub fn upsert_script_stats_batch(&self, script_stats: &HashMap<ScriptType, u64>) -> Result<()> {
         // Fixed: Connection doesn't need locking, it's already single-threaded
         
         for (script_type, count) in script_stats {
             let script_type_str = format!("{:?}", script_type);
             
             // First try to update existing record
-            let updated = self.conn.execute(
+            let updated = self.conn.lock()?.execute(
                 "UPDATE script_analysis SET count = ?, updated_at = CURRENT_TIMESTAMP WHERE script_type = ?",
                 (count, script_type_str.clone()),
             )?;
             
             // If no rows were updated, insert new record
             if updated == 0 {
-                self.conn.execute(
+                self.conn.lock()?.execute(
                     "INSERT INTO script_analysis (script_type, count, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
                     (script_type_str, count),
                 )?;
@@ -240,8 +242,8 @@ impl Database {
         Ok(())
     }
 
-    pub fn insert_recovered_key(&mut self, key: &RecoveredKeyRow) -> Result<()> {
-        self.conn.execute(
+    pub fn insert_recovered_key(&self, key: &RecoveredKeyRow) -> Result<()> {
+        self.conn.lock()?.execute(
             "INSERT INTO recovered_keys (txid1, txid2, r, private_key) VALUES (?, ?, ?, ?)",
             params![key.txid1, key.txid2, key.r, key.private_key],
         )?;
@@ -249,7 +251,7 @@ impl Database {
     }
 
     pub fn preload_recent_r_values(&self, limit: usize) -> Result<Vec<SignatureRow>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.lock()?.prepare(
             "SELECT tx_hash, block_height, input_index, address, pubkey, r, s, z, script_type 
              FROM signatures 
              ORDER BY block_height DESC, id DESC 
@@ -290,17 +292,17 @@ impl Database {
     }
 
     pub fn get_signature_count(&self) -> Result<u64> {
-        let count: u64 = self.conn.query_row("SELECT COUNT(*) FROM signatures", [], |row| row.get(0))?;
+        let count: u64 = self.conn.lock()?.query_row("SELECT COUNT(*) FROM signatures", [], |row| row.get(0))?;
         Ok(count)
     }
 
     pub fn get_recovered_key_count(&self) -> Result<u64> {
-        let count: u64 = self.conn.query_row("SELECT COUNT(*) FROM recovered_keys", [], |row| row.get(0))?;
+        let count: u64 = self.conn.lock()?.query_row("SELECT COUNT(*) FROM recovered_keys", [], |row| row.get(0))?;
         Ok(count)
     }
     
     pub fn save_checkpoint(&self, block_height: u32) -> Result<()> {
-        self.conn.execute(
+        self.conn.lock()?.execute(
             "INSERT OR REPLACE INTO checkpoints (id, last_processed_block, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)",
             params![block_height],
         )?;
@@ -308,7 +310,7 @@ impl Database {
     }
     
     pub fn get_last_checkpoint(&self) -> Result<Option<u32>> {
-        let result = self.conn.query_row(
+        let result = self.conn.lock()?.query_row(
             "SELECT last_processed_block FROM checkpoints WHERE id = 1",
             [],
             |row| row.get(0)

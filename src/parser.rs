@@ -11,38 +11,47 @@ use tracing;
 use crate::types::{SignatureRow, ScriptType, RawBlock, ParsedBlock}; // Added ParsedBlock
 use crate::rpc::RpcClient;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use hex;
 use tokio::time;
 use std::time::Instant;
 
-// Rate limiter that actually uses the configured rate_limit parameter
+// Thread-safe rate limiter that can be shared across multiple threads
 pub struct RateLimiter {
     max_per_second: u32,
-    last_request: Instant,
+    last_request: Arc<Mutex<Instant>>,
 }
 
 impl RateLimiter {
     pub fn new(max_per_second: u32) -> Self {
         Self {
             max_per_second,
-            last_request: Instant::now(),
+            last_request: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
-    pub async fn wait_if_needed(&mut self) {
-        let elapsed = self.last_request.elapsed();
+    pub async fn wait_if_needed(&self) {
+        let elapsed = {
+            let last_request = self.last_request.lock().unwrap();
+            last_request.elapsed()
+        };
+        
         let min_interval = time::Duration::from_millis(1000 / self.max_per_second as u64);
         if elapsed < min_interval {
             time::sleep(min_interval - elapsed).await;
         }
-        self.last_request = Instant::now();
+        
+        // Update the last request time
+        if let Ok(mut last_request) = self.last_request.lock() {
+            *last_request = Instant::now();
+        }
     }
 }
 
 pub async fn parse_block(
     raw_block: &RawBlock,
     rpc: &RpcClient,
-    rate_limiter: &mut RateLimiter,
+    rate_limiter: &RateLimiter,
 ) -> Result<ParsedBlock> {
     let block: Block = deserialize(&hex::decode(&raw_block.hex)?)?;
     

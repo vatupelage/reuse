@@ -1,75 +1,98 @@
 use crate::types::SignatureRow;
 use lru::LruCache;
-use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use parking_lot::RwLock;
 use tracing;
 
 pub struct RValueCache {
-    cache: Mutex<LruCache<String, Vec<SignatureRow>>>, // Store multiple signatures per R-value
+    cache: RwLock<LruCache<String, Vec<SignatureRow>>>,
+    max_signatures_per_r: usize,
+    max_cache_size: usize,
 }
 
 impl RValueCache {
     pub fn new(capacity: usize) -> Self {
-        let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(100_000).unwrap());
         Self {
-            cache: Mutex::new(LruCache::new(capacity)),
+            cache: RwLock::new(LruCache::new(NonZeroUsize::new(capacity).unwrap())),
+            max_signatures_per_r: 10, // Limit signatures per R-value
+            max_cache_size: capacity,
         }
     }
 
     pub fn check_and_insert(&self, r_value: &str, signature: SignatureRow) -> Option<SignatureRow> {
-        let mut cache = self.cache.lock();
+        let mut cache = self.cache.write();
         
-        if let Some(existing_signatures) = cache.get(r_value) {
-            // R-value reuse detected! Return the first existing signature
-            let first_signature = existing_signatures.first().unwrap().clone();
-            
-            // CRITICAL FIX: Limit signatures per R-value to prevent memory leaks
-            let max_signatures_per_r = 10; // Store max 10 signatures per R-value
-            
-            if existing_signatures.len() < max_signatures_per_r {
-                // Add the new signature to the list (within limit)
-                let mut updated_signatures = existing_signatures.clone();
-                updated_signatures.push(signature);
-                cache.put(r_value.to_string(), updated_signatures);
-            } else {
-                // Log that we're hitting the limit
-                tracing::warn!("R-value {} has {} signatures, limiting to prevent memory leak", 
-                    r_value, existing_signatures.len());
+        // Check if we need to clean up the cache
+        if cache.len() > self.max_cache_size * 9 / 10 {
+            self.cleanup_cache(&mut cache);
+        }
+        
+        if let Some(existing_signatures) = cache.get_mut(r_value) {
+            // Check if this signature already exists
+            if existing_signatures.iter().any(|sig| sig.txid == signature.txid && sig.input_index == signature.input_index) {
+                return None; // Already exists
             }
             
-            Some(first_signature)
+            // Add new signature with limit
+            if existing_signatures.len() < self.max_signatures_per_r {
+                existing_signatures.push(signature.clone());
+            } else {
+                // Replace oldest signature to maintain limit
+                existing_signatures.remove(0);
+                existing_signatures.push(signature.clone());
+            }
+            
+            // Return the first signature for comparison (oldest)
+            Some(existing_signatures[0].clone())
         } else {
-            // No reuse, store the new signature in a list
-            let signatures = vec![signature];
+            // New R-value
+            let mut signatures = Vec::new();
+            signatures.push(signature.clone());
             cache.put(r_value.to_string(), signatures);
             None
         }
     }
 
-    pub fn preload(&self, signatures: Vec<SignatureRow>) {
-        let mut cache = self.cache.lock();
-        
-        // Check length before consuming the vector
-        let signatures_len = signatures.len();
-        let max_preload = 10_000; // Limit preload to 10k signatures
+    pub fn preload(&self, signatures: Vec<SignatureRow>) -> Result<(), Box<dyn std::error::Error>> {
+        let mut cache = self.cache.write();
         
         // Limit preloading to prevent memory issues
-        let signatures_to_load: Vec<_> = signatures.into_iter().take(max_preload).collect();
+        let max_preload = 10_000;
+        let signatures_to_process = signatures.len().min(max_preload);
         
-        for sig in signatures_to_load {
-            let r_value = &sig.r;
-            if let Some(existing) = cache.get(r_value) {
-                let mut updated = existing.clone();
-                updated.push(sig.clone());
-                cache.put(r_value.clone(), updated);
+        for signature in signatures.iter().take(signatures_to_process) {
+            if let Some(existing_signatures) = cache.get_mut(&signature.r) {
+                if existing_signatures.len() < self.max_signatures_per_r {
+                    existing_signatures.push(signature.clone());
+                }
             } else {
-                cache.put(r_value.clone(), vec![sig.clone()]);
+                let mut signatures_vec = Vec::new();
+                signatures_vec.push(signature.clone());
+                cache.put(signature.r.clone(), signatures_vec);
             }
         }
         
-        // Log if we limited the preload
-        if signatures_len > max_preload {
-            tracing::warn!("Limited preload to {} signatures to prevent memory issues", max_preload);
-        }
+        tracing::info!("Preloaded {} signatures into cache", signatures_to_process);
+        Ok(())
     }
+    
+    fn cleanup_cache(&self, cache: &mut LruCache<String, Vec<SignatureRow>>) {
+        let target_size = self.max_cache_size / 2; // Reduce to 50%
+        while cache.len() > target_size {
+            if let Some((_, signatures)) = cache.pop_lru() {
+                // Drop the signatures to free memory
+                drop(signatures);
+            }
+        }
+        tracing::debug!("Cache cleaned up, reduced from {} to {} entries", self.max_cache_size, cache.len());
+    }
+    
+    pub fn get_cache_stats(&self) -> (usize, usize) {
+        let cache = self.cache.read();
+        let total_entries = cache.len();
+        let total_signatures = cache.iter().map(|(_, sigs)| sigs.len()).sum();
+        (total_entries, total_signatures)
+    }
+}
 }

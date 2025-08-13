@@ -26,61 +26,43 @@ impl RpcClient {
     pub async fn fetch_blocks_batch(&self, start_height: u32, end_height: u32) -> Result<Vec<RawBlock>> {
         let mut blocks = Vec::new();
         
-        // Fetch block hashes first
-        let heights: Vec<u32> = (start_height..=end_height).collect();
-        let hash_requests: Vec<JsonRpcRequest> = heights
-            .iter()
-            .map(|&height| JsonRpcRequest {
-                jsonrpc: "2.0".to_string(),
-                method: "getblockhash".to_string(),
-                params: vec![serde_json::Value::Number(height.into())],
-                id: height as i64,
-            })
-            .collect();
-
-        let hashes_response = self.batch_call(&hash_requests).await?;
-        
-        // Extract block hashes
-        let mut block_hashes = Vec::new();
-        for response in hashes_response {
-            if let Some(result) = response.result {
-                if let Some(hash) = result.as_str() {
-                    block_hashes.push(hash.to_string());
-                }
-            }
-        }
-
-        // Fetch raw blocks using hashes
-        let block_requests: Vec<JsonRpcRequest> = block_hashes
-            .iter()
-            .enumerate()
-            .map(|(i, hash)| JsonRpcRequest {
+        for height in start_height..=end_height {
+            let request = JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 method: "getblock".to_string(),
                 params: vec![
-                    serde_json::Value::String(hash.clone()),
-                    serde_json::Value::Number(0.into()) // 0 = raw hex format
+                    serde_json::Value::String(height.to_string()),
+                    serde_json::Value::Number(0.into()), // 0 = hex format
                 ],
-                id: i as i64,
-            })
-            .collect();
+                id: height as i64,
+            };
 
-        let blocks_response = self.batch_call(&block_requests).await?;
-        
-        // Parse raw hex response (not JSON object) - getblock with verbosity=0 returns raw hex string
-        for (i, response) in blocks_response.iter().enumerate() {
-            if let Some(result) = &response.result {
-                // getblock with verbosity=0 returns the raw hex string directly, not a nested object
-                if let Some(hex_str) = result.as_str() {
-                    let block = RawBlock {
-                        height: start_height + i as u32,
-                        hex: hex_str.to_string(),
-                    };
-                    blocks.push(block);
+            let responses = self.batch_call(&[request]).await?;
+            
+            if let Some(response) = responses.first() {
+                // CRITICAL FIX: Check for RPC errors in the response
+                if let Some(error) = &response.error {
+                    return Err(anyhow!("RPC error at block {}: {:?}", height, error));
                 }
+                
+                if let Some(result) = &response.result {
+                    if let Some(hex_str) = result.as_str() {
+                        let block = RawBlock {
+                            height,
+                            hex: hex_str.to_string(),
+                        };
+                        blocks.push(block);
+                    } else {
+                        return Err(anyhow!("Invalid response format for block {}", height));
+                    }
+                } else {
+                    return Err(anyhow!("No result returned for block {}", height));
+                }
+            } else {
+                return Err(anyhow!("No response received for block {}", height));
             }
         }
-
+        
         Ok(blocks)
     }
 
@@ -98,6 +80,11 @@ impl RpcClient {
         let responses = self.batch_call(&[request]).await?;
         
         if let Some(response) = responses.first() {
+            // CRITICAL FIX: Check for RPC errors in the response
+            if let Some(error) = &response.error {
+                return Err(anyhow!("RPC error for transaction {}: {:?}", txid, error));
+            }
+            
             if let Some(result) = &response.result {
                 if let Some(hex_str) = result.as_str() {
                     let tx_bytes = hex::decode(hex_str)?;
@@ -146,9 +133,11 @@ struct JsonRpcRequest {
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse<T> {
     result: Option<T>,
+    error: Option<RpcError>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RpcError {
-    // Fields removed as they're not used
+    code: i32,
+    message: String,
 }

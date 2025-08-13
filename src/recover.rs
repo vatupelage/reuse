@@ -31,42 +31,34 @@ pub fn attempt_recover_k_and_priv(
         return Ok(None);
     }
 
-    // Check if Z values are different (different messages)
-    if z1 == z2 {
-        return Ok(None);
+    // Check if z-values are the same (which would make recovery impossible)
+    if z1.to_bytes() == z2.to_bytes() {
+        return Ok(None); // Cannot recover if z-values are identical
     }
 
-    // Calculate the difference in Z values using modular arithmetic
-    // Note: We can't directly compare Scalars, so we'll use subtraction and handle the result
-    // Instead of direct comparison, subtract and check if result is zero
+    // Calculate k = (z1 - z2) / (s1 - s2) mod n
     let z_diff = z1 - z2;
-    
-    // Calculate the difference in S values using modular arithmetic
-    // If the result would be negative in normal arithmetic, 
-    // the modular subtraction automatically handles it correctly
-    // No need for manual comparison
     let s_diff = s1 - s2;
-
-    // Calculate the inverse of the S difference - handle CtOption properly
-    let s_diff_inv = s_diff.invert();
-    if s_diff_inv.is_none().into() {
-        return Ok(None); // No inverse exists
-    }
-    let s_diff_inv = s_diff_inv.unwrap();
-
-    // Calculate the inverse of R1
-    let r_inv = r1.invert();
-    if r_inv.is_none().into() {
-        return Ok(None); // No inverse exists
-    }
-    let r_inv = r_inv.unwrap();
-
-    // Calculate k = (z1 - z2) * (s1 - s2)^(-1) mod n
+    
+    // Calculate s_diff inverse
+    let s_diff_inv = s_diff.invert().unwrap();
     let k = z_diff * s_diff_inv;
-
-    // Calculate the private key: priv = (s1 * k - z1) * r^(-1) mod n
-    let priv_key = (s1 * k - z1) * r_inv;
-
+    
+    // Calculate private key: priv_key = (s1 * k - z1) / r1 mod n
+    let s1_k = s1 * k;
+    let priv_key = (s1_k - z1) * r1.invert().unwrap();
+    
+    // CRITICAL FIX: Validate by recreating the original signatures
+    let k_inv = k.invert().unwrap();
+    let recreated_s1 = k_inv * (z1 + r1 * priv_key);
+    let recreated_s2 = k_inv * (z2 + r2 * priv_key);
+    
+    // Check if recreated signatures match the original ones
+    if recreated_s1.to_bytes() != s1.to_bytes() || recreated_s2.to_bytes() != s2.to_bytes() {
+        tracing::warn!("Private key recovery validation failed: recreated signatures don't match");
+        return Ok(None); // Recovery failed validation
+    }
+    
     // VALIDATION: Verify the recovered private key is correct
     // Derive the public key from the recovered private key
     let recovered_pubkey = derive_pubkey_from_private(&priv_key)?;
