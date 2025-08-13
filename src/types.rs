@@ -17,6 +17,7 @@ pub struct ScannerConfig {
 pub struct SignatureRow {
     pub txid: String,
     pub block_height: u32,
+    pub input_index: u32,  // Added: Track which input within the transaction
     pub address: String,
     pub pubkey: String,
     pub r: String,

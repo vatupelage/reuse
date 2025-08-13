@@ -2,6 +2,7 @@ use crate::types::SignatureRow;
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
+use tracing;
 
 pub struct RValueCache {
     cache: Mutex<LruCache<String, Vec<SignatureRow>>>, // Store multiple signatures per R-value
@@ -38,7 +39,12 @@ impl RValueCache {
 
     pub fn preload(&self, signatures: Vec<SignatureRow>) {
         let mut cache = self.cache.lock();
-        for sig in signatures {
+        
+        // Limit preloading to prevent memory issues
+        let max_preload = 10_000; // Limit preload to 10k signatures
+        let signatures_to_load: Vec<_> = signatures.into_iter().take(max_preload).collect();
+        
+        for sig in signatures_to_load {
             let r_value = &sig.r;
             if let Some(existing) = cache.get(r_value) {
                 let mut updated = existing.clone();
@@ -47,6 +53,11 @@ impl RValueCache {
             } else {
                 cache.put(r_value.clone(), vec![sig.clone()]);
             }
+        }
+        
+        // Log if we limited the preload
+        if signatures.len() > max_preload {
+            tracing::warn!("Limited preload to {} signatures to prevent memory issues", max_preload);
         }
     }
 }

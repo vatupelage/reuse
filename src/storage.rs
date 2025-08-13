@@ -200,7 +200,7 @@ impl Database {
             stmt.execute((
                 sig.block_height,
                 &sig.txid, // Using txid from SignatureRow as tx_hash
-                0, // Default input_index since SignatureRow doesn't have it
+                sig.input_index, // FIXED: Use actual input_index instead of hardcoded 0
                 &sig.r,
                 &sig.s,
                 &sig.z,
@@ -250,14 +250,14 @@ impl Database {
 
     pub fn preload_recent_r_values(&self, limit: usize) -> Result<Vec<SignatureRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT tx_hash, block_height, address, pubkey, r, s, z, script_type 
+            "SELECT tx_hash, block_height, input_index, address, pubkey, r, s, z, script_type 
              FROM signatures 
              ORDER BY block_height DESC, id DESC 
              LIMIT ?"
         )?;
 
         let rows = stmt.query_map(params![limit], |row| {
-            let script_type_str: String = row.get(7)?;
+            let script_type_str: String = row.get(8)?; // Updated index for script_type
             let script_type = match script_type_str.as_str() {
                 "P2PKH" => ScriptType::P2PKH,
                 "P2SH" => ScriptType::P2SH,
@@ -271,11 +271,12 @@ impl Database {
             Ok(SignatureRow {
                 txid: row.get(0)?, // tx_hash maps to txid
                 block_height: row.get(1)?,
-                address: row.get(2)?,
-                pubkey: row.get(3)?,
-                r: row.get(4)?,
-                s: row.get(5)?,
-                z: row.get(6)?,
+                input_index: row.get(2)?, // Added: Include input_index
+                address: row.get(3)?,
+                pubkey: row.get(4)?,
+                r: row.get(5)?,
+                s: row.get(6)?,
+                z: row.get(7)?,
                 script_type,
             })
         })?;

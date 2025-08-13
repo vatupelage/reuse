@@ -126,6 +126,7 @@ pub async fn parse_block(
                             let sig_row = SignatureRow {
                                 txid: tx.txid().to_string(),
                                 block_height: raw_block.height,
+                                input_index: input_index as u32,  // Added: Include actual input index
                                 address: address.to_string(),
                                 pubkey: hex::encode(pubkey.to_bytes()),
                                 r: hex::encode(r_bytes),
