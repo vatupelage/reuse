@@ -1,51 +1,68 @@
 use anyhow::{anyhow, Result};
 use bitcoin::{
-    consensus::encode::deserialize,
-    Block, PublicKey, Script, Transaction, TxIn,
-    blockdata::script::Instruction,
-    Address, Network,
-    sighash::{SighashCache, EcdsaSighashType},  // Fixed: correct Bitcoin 0.30 imports
+    Block, Transaction, TxIn, Script, EcdsaSighashType, SighashCache,
+    consensus::deserialize,
 };
 use bitcoin_hashes::Hash;  // Import Hash trait directly from bitcoin_hashes
 use k256::ecdsa::Signature as K256Signature;
 use tracing;
-
-use crate::types::{ParsedBlock, RawBlock, SignatureRow, ScriptType};
+use crate::types::{SignatureRow, ScriptType, RawBlock};
 use crate::rpc::RpcClient;
+use std::collections::{HashMap, HashSet};
+use futures::future;
 
-pub async fn parse_block(raw_block: &RawBlock, rpc: &RpcClient) -> Result<ParsedBlock> {
+pub async fn parse_block(
+    raw_block: &RawBlock,
+    rpc: &RpcClient,
+) -> Result<ParsedBlock> {
     let block: Block = deserialize(&hex::decode(&raw_block.hex)?)?;
+    
     let mut signatures = Vec::new();
     let mut script_stats = std::collections::HashMap::new();
-
-    // First pass: collect all needed transaction IDs for UTXO lookup
-    let mut needed_txids = std::collections::HashSet::new();
+    
+    // Build transaction cache for this block
+    let mut tx_cache = std::collections::HashMap::new();
+    
+    // First pass: collect all transaction IDs that we need for Z-value calculation
+    let mut required_txids = std::collections::HashSet::new();
     for tx in &block.txdata {
         for input in &tx.input {
-            if !input.previous_output.is_null() {
-                needed_txids.insert(input.previous_output.txid);
-            }
+            required_txids.insert(input.previous_output.txid);
         }
     }
-
-    // Batch fetch all needed transactions
-    let mut tx_cache = std::collections::HashMap::new();
-    for txid in needed_txids {
-        match rpc.get_transaction(&txid).await {
-            Ok(tx) => {
-                tx_cache.insert(txid, tx);
-            },
-            Err(e) => {
-                tracing::warn!("Could not fetch transaction {}: {}", txid, e);
+    
+    // Fetch all required transactions in parallel
+    let mut fetch_futures = Vec::new();
+    for txid in &required_txids {
+        let rpc = rpc.clone();
+        let txid = *txid;
+        fetch_futures.push(async move {
+            match rpc.get_transaction(&txid).await {
+                Ok(tx) => Some((txid, tx)),
+                Err(e) => {
+                    tracing::warn!("Failed to fetch transaction {}: {}", txid, e);
+                    None
+                }
             }
+        });
+    }
+    
+    // Wait for all transactions to be fetched
+    let fetched_txs: Vec<_> = futures::future::join_all(fetch_futures).await;
+    for result in fetched_txs {
+        if let Some((txid, tx)) = result {
+            tx_cache.insert(txid, tx);
         }
     }
-
-    // Second pass: process signatures using cached transactions
-    for (_tx_index, tx) in block.txdata.iter().enumerate() {
+    
+    tracing::info!("Fetched {}/{} required transactions for block {}", 
+        tx_cache.len(), required_txids.len(), raw_block.height);
+    
+    // Second pass: process transactions and extract signatures
+    for (tx_index, tx) in block.txdata.iter().enumerate() {
         for (input_index, input) in tx.input.iter().enumerate() {
-            // Skip coinbase transactions
-            if input.previous_output.is_null() {
+            // Skip coinbase transaction input
+            if tx_index == 0 && input_index == 0 {
                 continue;
             }
 
@@ -54,34 +71,41 @@ pub async fn parse_block(raw_block: &RawBlock, rpc: &RpcClient) -> Result<Parsed
                 // Extract public key and address
                 if let Some((pubkey, address, script_type)) = extract_pubkey_and_address(input)? {
                     // Calculate real message hash (z-value) using cached transaction
-                    let z_value = calculate_message_hash_with_cache(
+                    match calculate_message_hash_with_cache(
                         tx, 
                         input_index, 
                         input, 
                         sighash_type, 
                         &tx_cache
-                    )?;
-
-                    // Extract r and s values from K256 signature
-                    let sig_bytes = sig.to_bytes();
-                    let r_bytes = &sig_bytes[..32];
-                    let s_bytes = &sig_bytes[32..64];
-                    
-                    let sig_row = SignatureRow {
-                        txid: tx.txid().to_string(),
-                        block_height: raw_block.height,
-                        address: address.to_string(),
-                        pubkey: hex::encode(pubkey.to_bytes()),
-                        r: hex::encode(r_bytes),
-                        s: hex::encode(s_bytes),
-                        z: hex::encode(z_value),
-                        script_type: script_type.clone(),
-                    };
-                    
-                    signatures.push(sig_row);
-                    
-                    // Update script statistics
-                    *script_stats.entry(script_type).or_insert(0) += 1;
+                    ) {
+                        Ok(z_value) => {
+                            // Extract r and s values from K256 signature
+                            let sig_bytes = sig.to_bytes();
+                            let r_bytes = &sig_bytes[..32];
+                            let s_bytes = &sig_bytes[32..64];
+                            
+                            let sig_row = SignatureRow {
+                                txid: tx.txid().to_string(),
+                                block_height: raw_block.height,
+                                address: address.to_string(),
+                                pubkey: hex::encode(pubkey.to_bytes()),
+                                r: hex::encode(r_bytes),
+                                s: hex::encode(s_bytes),
+                                z: hex::encode(z_value),
+                                script_type: script_type.clone(),
+                            };
+                            
+                            signatures.push(sig_row);
+                            
+                            // Update script statistics
+                            *script_stats.entry(script_type).or_insert(0) += 1;
+                        },
+                        Err(e) => {
+                            // Skip this signature if we can't calculate Z-value
+                            tracing::debug!("Skipping signature due to Z-value calculation failure: {}", e);
+                            continue;
+                        }
+                    }
                 }
             }
         }
@@ -163,14 +187,10 @@ fn calculate_message_hash_with_cache(
         // Fixed: use correct method to get bytes from Sighash in Bitcoin 0.30
         Ok(hash)
     } else {
-        // Fallback: use a placeholder z-value when we can't fetch the previous transaction
-        // This allows the scanner to continue processing other signatures
-        // TODO: Implement proper UTXO management for complete z-value calculation
-        tracing::warn!(
-            "Previous transaction {} not found in cache. Using fallback z-value.",
-            input.previous_output.txid
-        );
-        Ok([0u8; 32])
+        // CRITICAL FIX: Instead of falling back to zero, return an error
+        // This ensures we don't process signatures with invalid Z-values
+        Err(anyhow!("Previous transaction {} not found in cache. Cannot calculate Z-value.", 
+            input.previous_output.txid))
     }
 }
 

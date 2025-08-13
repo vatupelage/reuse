@@ -2,12 +2,14 @@ use anyhow::{anyhow, Result};
 use k256::{
     Scalar,
     elliptic_curve::PrimeField,
+    SecretKey,
 };
 use num_bigint::{BigUint, ToBigUint};
 use num_traits::{Zero, ToPrimitive};
 use num_integer::Integer;
 use sha2::{Sha256, Digest};
 use crate::types::{SignatureRow, RecoveredKeyRow};
+use hex;
 
 /// Attempts to recover the private key using the ECDSA reused-k attack
 /// This attack works when the same k value is used in two different signatures
@@ -65,6 +67,23 @@ pub fn attempt_recover_k_and_priv(
     // Calculate the private key: priv = (s1 * k - z1) * r^(-1) mod n
     let priv_key = (s1 * k - z1) * r_inv;
 
+    // VALIDATION: Verify the recovered private key is correct
+    // Derive the public key from the recovered private key
+    let recovered_pubkey = derive_pubkey_from_private(&priv_key)?;
+    
+    // Get the expected public key from the first signature
+    let expected_pubkey_bytes = hex::decode(&sig1.pubkey)?;
+    let expected_pubkey = k256::PublicKey::from_sec1_bytes(&expected_pubkey_bytes)
+        .map_err(|e| anyhow!("Invalid public key format: {}", e))?;
+    
+    // Compare the recovered public key with the expected one
+    if recovered_pubkey != expected_pubkey {
+        tracing::warn!("Private key recovery validation failed for R-value {}", sig1.r);
+        return Ok(None); // Recovery failed validation
+    }
+    
+    tracing::info!("Successfully recovered private key for R-value {}", sig1.r);
+
     // Convert private key to WIF format
     let private_key_wif = scalar_to_wif(&priv_key)?;
 
@@ -74,6 +93,17 @@ pub fn attempt_recover_k_and_priv(
         r: sig1.r.clone(),
         private_key: private_key_wif,
     }))
+}
+
+fn derive_pubkey_from_private(private_key: &Scalar) -> Result<k256::PublicKey> {
+    // Convert scalar to secret key
+    let secret_key = k256::SecretKey::from_slice(&private_key.to_bytes())
+        .map_err(|e| anyhow!("Invalid private key: {}", e))?;
+    
+    // Derive public key from secret key
+    let public_key = k256::PublicKey::from_secret_key(&secret_key);
+    
+    Ok(public_key)
 }
 
 fn parse_hex_to_scalar(hex_str: &str) -> Result<Scalar> {

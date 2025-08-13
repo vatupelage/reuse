@@ -169,6 +169,12 @@ impl Database {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+            
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                id INTEGER PRIMARY KEY,
+                last_processed_block INTEGER NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
         "#;
         
         // Execute schema creation with better error handling
@@ -290,5 +296,26 @@ impl Database {
     pub fn get_recovered_key_count(&self) -> Result<u64> {
         let count: u64 = self.conn.query_row("SELECT COUNT(*) FROM recovered_keys", [], |row| row.get(0))?;
         Ok(count)
+    }
+    
+    pub fn save_checkpoint(&self, block_height: u32) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO checkpoints (id, last_processed_block, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)",
+            params![block_height],
+        )?;
+        Ok(())
+    }
+    
+    pub fn get_last_checkpoint(&self) -> Result<Option<u32>> {
+        let result: Result<u32> = self.conn.query_row(
+            "SELECT last_processed_block FROM checkpoints WHERE id = 1",
+            [],
+            |row| row.get(0)
+        );
+        
+        match result {
+            Ok(block_height) => Ok(Some(block_height)),
+            Err(_) => Ok(None), // No checkpoint found
+        }
     }
 }

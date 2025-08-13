@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use crate::types::RawBlock;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RpcClient {
     http: Client,
     url: String,

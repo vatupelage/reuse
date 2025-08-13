@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::{info, error, Level};
 use tracing_subscriber;
+use futures::stream::StreamExt;
 
 mod types;
 mod storage;
@@ -11,7 +12,7 @@ mod parser;
 mod recover;
 mod stats;
 
-use types::ScannerConfig;
+use types::{ScannerConfig, ParsedBlock};
 use storage::Database;
 use cache::RValueCache;
 use rpc::RpcClient;
@@ -92,22 +93,49 @@ async fn main() -> Result<()> {
 async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCache, rpc: &RpcClient) -> Result<()> {
     let mut stats = RuntimeStats::start();
     
+    // Check for existing checkpoint to resume scanning
+    let mut current_block = match db.get_last_checkpoint()? {
+        Some(checkpoint) => {
+            info!("Resuming from checkpoint: block {}", checkpoint);
+            checkpoint + 1
+        },
+        None => {
+            info!("Starting fresh scan from block {}", config.start_block);
+            config.start_block
+        }
+    };
+    
     // Preload recent R-values from database
     let recent_signatures = db.preload_recent_r_values(100_000)?;
     cache.preload(recent_signatures);
     
-    let mut current_block = config.start_block;
-    
     while current_block <= config.end_block {
         let end_block = std::cmp::min(current_block + config.batch_size as u32 - 1, config.end_block);
+        
+        info!("Processing blocks {} to {}", current_block, end_block);
         
         // Fetch blocks in batch
         let blocks = rpc.fetch_blocks_batch(current_block, end_block).await?;
         stats.api_requests += 1; // Count batch request
         
+        // Process blocks in parallel using the configured thread count
+        let mut block_futures = Vec::new();
         for block in blocks {
-            // Parse block (now async)
-            let parsed_block = parser::parse_block(&block, rpc).await?;
+            let rpc = rpc.clone();
+            block_futures.push(async move {
+                parser::parse_block(&block, &rpc).await
+            });
+        }
+        
+        // Process blocks with controlled concurrency
+        let parsed_blocks: Vec<_> = futures::stream::iter(block_futures)
+            .buffer_unordered(config.threads)
+            .collect()
+            .await;
+        
+        // Process results sequentially to avoid database contention
+        for parsed_block in parsed_blocks {
+            let parsed_block = parsed_block?;
             
             // Process signatures and check for R-value reuse
             for signature in &parsed_block.signatures {
@@ -116,6 +144,7 @@ async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCac
                     if let Ok(Some(recovered_key)) = recover::attempt_recover_k_and_priv(signature, &reused_sig) {
                         db.insert_recovered_key(&recovered_key)?;
                         stats.keys_recovered += 1;
+                        info!("Recovered private key for R-value reuse!");
                     }
                     stats.r_value_reuse_detected += 1;
                 }
@@ -134,9 +163,19 @@ async fn orchestrate(config: ScannerConfig, db: &mut Database, cache: &RValueCac
         
         current_block = end_block + 1;
         
+        // Save checkpoint every 100 blocks for crash recovery
+        if current_block % 100 == 0 {
+            db.save_checkpoint(current_block - 1)?;
+            info!("Checkpoint saved at block {}", current_block - 1);
+        }
+        
         // Report progress
         stats.report_progress();
     }
+    
+    // Save final checkpoint
+    db.save_checkpoint(config.end_block)?;
+    info!("Final checkpoint saved at block {}", config.end_block);
     
     stats.print_summary();
     Ok(())
