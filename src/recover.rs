@@ -9,6 +9,7 @@ use num_integer::Integer;
 use sha2::{Sha256, Digest};
 use crate::types::{SignatureRow, RecoveredKeyRow};
 use hex;
+use bs58;
 
 /// Attempts to recover the private key using the ECDSA reused-k attack
 /// This attack works when the same k value is used in two different signatures
@@ -98,7 +99,8 @@ pub fn attempt_recover_k_and_priv(
     // Verify signature with recovered public key
     let verification_result = recovered_pubkey.verify(&test_hash, &test_signature);
     if verification_result.is_err() {
-        tracing::warn!("Private key signature verification failed for R-value {}", sig1.r);
+        tracing::warn!("Private key signature verification failed for R-value {}: {:?}", 
+            sig1.r, verification_result.err());
         return Ok(None); // Recovery failed signature verification
     }
     
@@ -160,31 +162,6 @@ fn scalar_to_wif(scalar: &Scalar) -> Result<String> {
     // Add first 4 bytes of double hash as checksum
     wif_bytes.extend_from_slice(&hash2[..4]);
     
-    // Base58 encode
-    Ok(base58_encode(&wif_bytes))
-}
-
-fn base58_encode(bytes: &[u8]) -> String {
-    let alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let base = 58u32;
-    
-    let mut num = BigUint::from_bytes_be(bytes);
-    let mut result = String::new();
-    
-    while num > BigUint::zero() {
-        let (quotient, remainder) = num.div_rem(&base.to_biguint().unwrap());
-        result.push(alphabet.chars().nth(remainder.to_u32().unwrap() as usize).unwrap());
-        num = quotient;
-    }
-    
-    // Add leading '1's for each leading zero byte
-    for &byte in bytes {
-        if byte == 0 {
-            result.push('1');
-        } else {
-            break;
-        }
-    }
-    
-    result.chars().rev().collect()
+    // Use bs58 crate for reliable base58 encoding
+    Ok(bs58::encode(wif_bytes).into_string())
 }

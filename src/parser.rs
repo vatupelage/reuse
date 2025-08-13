@@ -204,9 +204,14 @@ fn calculate_message_hash_with_cache(
                 // SegWit v0 signature hash for P2WSH
                 // CRITICAL FIX: Extract witness script from witness data, not from prev_output
                 let witness_script = extract_witness_script_from_input(input)?;
+                
+                // FIXED: For P2WSH, we need to use the script code (witness script hash)
+                // The script code is the hash of the witness script
+                let script_code = witness_script.script_hash();
+                
                 let hash = sighash_cache.segwit_signature_hash(
                     input_index, 
-                    &witness_script,  // FIXED: Use actual witness script, not prev_output script
+                    &script_code,  // FIXED: Use script code (witness script hash), not witness script directly
                     prev_output.value, 
                     sighash_type
                 )?;
@@ -223,9 +228,12 @@ fn calculate_message_hash_with_cache(
                 match actual_script_type {
                     ScriptType::P2WPKH | ScriptType::P2WSH => {
                         // P2SH-wrapped SegWit: use SegWit sighash
+                        // FIXED: For P2SH-wrapped SegWit, use script code (redeem script hash), not redeem script directly
+                        let script_code = redeem_script.script_hash();
+                        
                         let hash = sighash_cache.segwit_signature_hash(
                             input_index, 
-                            &redeem_script,  // Use redeem script
+                            &script_code,  // FIXED: Use script code (redeem script hash), not redeem script directly
                             prev_output.value, 
                             sighash_type
                         )?;
@@ -368,15 +376,25 @@ fn pubkey_to_address(pubkey: &PublicKey) -> String {
 }
 
 fn extract_witness_script_from_input(input: &TxIn) -> Result<Script> {
-    // For P2WSH, the witness script is typically the last witness item
-    // The witness structure is: [signature, public_key, witness_script]
-    if input.witness.len() >= 3 {
-        // The last item should be the witness script
-        let witness_script_bytes = input.witness.last().unwrap();
-        Ok(Script::new(witness_script_bytes.to_vec()))
-    } else {
-        Err(anyhow!("P2WSH input must have at least 3 witness items"))
+    if input.witness.is_empty() {
+        return Err(anyhow!("No witness data for P2WSH input"));
     }
+    
+    // The witness script is always the last item
+    let witness_script_bytes = input.witness.last()
+        .ok_or_else(|| anyhow!("Empty witness stack"))?;
+    
+    // Validate it looks like a script (basic check)
+    if witness_script_bytes.is_empty() {
+        return Err(anyhow!("Empty witness script"));
+    }
+    
+    // Additional validation: check if it looks like a valid script
+    if witness_script_bytes.len() < 2 {
+        return Err(anyhow!("Witness script too short to be valid"));
+    }
+    
+    Ok(Script::from(witness_script_bytes.to_vec()))
 }
 
 fn extract_redeem_script_from_input(input: &TxIn) -> Result<Script> {
