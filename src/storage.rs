@@ -83,7 +83,7 @@ impl Database {
         
         // Test the database connection with a simple query
         eprintln!("Testing database connection...");
-        match db.conn.execute("SELECT 1", []) {
+        match db.conn.query_row("SELECT 1", [], |_row| Ok(())) {
             Ok(_) => eprintln!("Database connection test successful"),
             Err(e) => {
                 eprintln!("Warning: Database connection test failed: {}", e);
