@@ -21,8 +21,6 @@ impl Database {
     }
 
     pub fn init_schema(&self) -> Result<()> {
-        let conn = self.conn.get()?;
-        
         // Create tables and indexes in a single batch
         let schema_sql = r#"
             CREATE TABLE IF NOT EXISTS signatures (
@@ -67,7 +65,7 @@ impl Database {
             );
         "#;
         
-        conn.execute_batch(schema_sql)?;
+        self.conn.execute_batch(schema_sql)?;
         
         Ok(())
     }
@@ -76,19 +74,20 @@ impl Database {
         let tx = self.conn.transaction()?;
 
         let mut stmt = tx.prepare(
-            "INSERT INTO signatures (txid, block_height, address, pubkey, r, s, z, script_type, created_at) 
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
+            "INSERT INTO signatures (block_height, tx_hash, input_index, r, s, z, pubkey, address, script_type, created_at) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
         )?;
 
         for sig in signatures {
             stmt.execute((
-                &sig.txid,
                 sig.block_height,
-                &sig.address,
-                &sig.pubkey,
+                &sig.txid, // Using txid from SignatureRow as tx_hash
+                0, // Default input_index since SignatureRow doesn't have it
                 &sig.r,
                 &sig.s,
                 &sig.z,
+                &sig.pubkey,
+                &sig.address,
                 format!("{:?}", sig.script_type),
             ))?;
         }
@@ -106,7 +105,7 @@ impl Database {
             let script_type_str = format!("{:?}", script_type);
             
             self.conn.execute(
-                "INSERT OR REPLACE INTO script_analysis (script_type, count, last_updated) 
+                "INSERT OR REPLACE INTO script_analysis (script_type, count, updated_at) 
                  VALUES (?, ?, datetime('now'))",
                 (script_type_str, count),
             )?;
@@ -117,15 +116,15 @@ impl Database {
 
     pub fn insert_recovered_key(&mut self, key: &RecoveredKeyRow) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO recovered_keys (txid1, txid2, r, private_key) VALUES (?, ?, ?, ?)",
-            params![key.txid1, key.txid2, key.r, key.private_key],
+            "INSERT INTO recovered_keys (private_key, public_key, address, tx_hash1, tx_hash2, block_height1, block_height2) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![key.private_key, key.public_key, key.address, key.txid1, key.txid2, key.block_height1, key.block_height2],
         )?;
         Ok(())
     }
 
     pub fn preload_recent_r_values(&self, limit: usize) -> Result<Vec<SignatureRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT txid, block_height, address, pubkey, r, s, z, script_type 
+            "SELECT tx_hash, block_height, address, pubkey, r, s, z, script_type 
              FROM signatures 
              ORDER BY block_height DESC, id DESC 
              LIMIT ?"
