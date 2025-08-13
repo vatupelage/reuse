@@ -205,13 +205,11 @@ fn calculate_message_hash_with_cache(
                 // CRITICAL FIX: Extract witness script from witness data, not from prev_output
                 let witness_script = extract_witness_script_from_input(input)?;
                 
-                // FIXED: For P2WSH, we need to use the script code (witness script hash)
-                // The script code is the hash of the witness script
-                let script_code = witness_script.script_hash();
-                
+                // FIXED: For P2WSH, we need to use the witness script directly, not its hash
+                // The script code is the actual witness script for SegWit signature verification
                 let hash = sighash_cache.segwit_signature_hash(
                     input_index, 
-                    &script_code,  // FIXED: Use script code (witness script hash), not witness script directly
+                    &witness_script,  // FIXED: Use witness script directly, not script_hash()
                     prev_output.value, 
                     sighash_type
                 )?;
@@ -226,14 +224,40 @@ fn calculate_message_hash_with_cache(
                 let actual_script_type = determine_script_type(&redeem_script);
                 
                 match actual_script_type {
-                    ScriptType::P2WPKH | ScriptType::P2WSH => {
-                        // P2SH-wrapped SegWit: use SegWit sighash
-                        // FIXED: For P2SH-wrapped SegWit, use script code (redeem script hash), not redeem script directly
-                        let script_code = redeem_script.script_hash();
-                        
+                    ScriptType::P2WPKH => {
+                        // P2SH-wrapped P2WPKH: need to derive proper script code
+                        // Extract the public key hash from the redeem script
+                        // P2WPKH redeem script format: OP_0 <20-byte-pubkey-hash>
+                        if redeem_script.as_bytes().len() == 22 && 
+                           redeem_script.as_bytes()[0] == 0x00 && 
+                           redeem_script.as_bytes()[1] == 0x14 {
+                            
+                            let pubkey_hash = &redeem_script.as_bytes()[2..22];
+                            // Create the script code for P2WPKH (OP_DUP OP_HASH160 <pubkey_hash> OP_EQUALVERIFY OP_CHECKSIG)
+                            let script_code = bitcoin::blockdata::script::Builder::new()
+                                .push_opcode(bitcoin::blockdata::opcodes::all::OP_DUP)
+                                .push_opcode(bitcoin::blockdata::opcodes::all::OP_HASH160)
+                                .push_slice(pubkey_hash)
+                                .push_opcode(bitcoin::blockdata::opcodes::all::OP_EQUALVERIFY)
+                                .push_opcode(bitcoin::blockdata::opcodes::all::OP_CHECKSIG)
+                                .into_script();
+                            
+                            let hash = sighash_cache.segwit_signature_hash(
+                                input_index, 
+                                &script_code,  // Use the derived script code
+                                prev_output.value, 
+                                sighash_type
+                            )?;
+                            *hash.as_byte_array()
+                        } else {
+                            return Err(anyhow!("Invalid P2WPKH redeem script format in P2SH"));
+                        }
+                    },
+                    ScriptType::P2WSH => {
+                        // P2SH-wrapped P2WSH: use redeem script directly
                         let hash = sighash_cache.segwit_signature_hash(
                             input_index, 
-                            &script_code,  // FIXED: Use script code (redeem script hash), not redeem script directly
+                            &redeem_script,  // Use redeem script directly
                             prev_output.value, 
                             sighash_type
                         )?;
