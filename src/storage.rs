@@ -1,9 +1,8 @@
 use anyhow::{anyhow, Result};
-use rusqlite::{Connection, params, Row, Statement};
-use std::path::Path;
-use std::collections::HashMap;
+use rusqlite::{Connection, params};
 use crate::types::{SignatureRow, RecoveredKeyRow, ScriptType};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use parking_lot::Mutex;
 
 pub struct Database {
     conn: Mutex<Connection>,

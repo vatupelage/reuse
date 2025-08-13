@@ -3,13 +3,12 @@ use k256::{
     Scalar,
     elliptic_curve::PrimeField,
 };
-use num_bigint::{BigUint, ToBigUint};
-use num_traits::{Zero, ToPrimitive};
-use num_integer::Integer;
 use sha2::{Sha256, Digest};
 use crate::types::{SignatureRow, RecoveredKeyRow};
 use hex;
 use bs58;
+use k256::ecdsa::signature::{Signer, Verifier};
+use k256::ecdsa::{SigningKey, VerifyingKey};
 
 /// Attempts to recover the private key using the ECDSA reused-k attack
 /// This attack works when the same k value is used in two different signatures
@@ -75,16 +74,12 @@ pub fn attempt_recover_k_and_priv(
     }
     
     // ADDITIONAL VALIDATION: Verify the private key can sign and verify
-    // Create a test message and verify the signature
-    let test_message = b"Bitcoin ECDSA vulnerability test";
-    let test_hash = sha2::Sha256::digest(test_message);
+    // Create a test message to verify the recovered private key
+    let test_message = b"Test message for key verification";
+    let test_hash = Sha256::digest(test_message);
     
-    // Convert hash to scalar
-    let test_scalar = Scalar::from_repr_vartime(test_hash.into())
-        .ok_or_else(|| anyhow!("Invalid test hash scalar"))?;
-    
-    // Create signature with recovered private key
-    let test_signature = k256::ecdsa::SigningKey::from_bytes(&priv_key.to_bytes())
+    // Sign the test message with the recovered private key
+    let test_signature = SigningKey::from_bytes(&priv_key.to_bytes())
         .map_err(|e| anyhow!("Invalid signing key: {}", e))?
         .sign(&test_hash);
     

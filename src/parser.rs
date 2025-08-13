@@ -246,7 +246,7 @@ fn calculate_message_hash_with_cache(
                             let script_code = bitcoin::blockdata::script::Builder::new()
                                 .push_opcode(bitcoin::blockdata::opcodes::all::OP_DUP)
                                 .push_opcode(bitcoin::blockdata::opcodes::all::OP_HASH160)
-                                .push_slice(pubkey_hash)
+                                .push_slice(pubkey_hash.to_vec())
                                 .push_opcode(bitcoin::blockdata::opcodes::all::OP_EQUALVERIFY)
                                 .push_opcode(bitcoin::blockdata::opcodes::all::OP_CHECKSIG)
                                 .into_script();
@@ -427,7 +427,7 @@ fn extract_witness_script_from_input(input: &TxIn) -> Result<Script> {
         return Err(anyhow!("Witness script too short to be valid"));
     }
     
-    Ok(Script::from(witness_script_bytes.to_vec()))
+    Ok(Script::new(witness_script_bytes.to_vec()))
 }
 
 fn extract_redeem_script_from_input(input: &TxIn) -> Result<Script> {

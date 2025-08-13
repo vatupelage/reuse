@@ -1,6 +1,5 @@
 use crate::types::SignatureRow;
 use lru::LruCache;
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use parking_lot::RwLock;
 use tracing;
