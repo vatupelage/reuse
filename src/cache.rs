@@ -40,8 +40,11 @@ impl RValueCache {
     pub fn preload(&self, signatures: Vec<SignatureRow>) {
         let mut cache = self.cache.lock();
         
-        // Limit preloading to prevent memory issues
+        // Check length before consuming the vector
+        let signatures_len = signatures.len();
         let max_preload = 10_000; // Limit preload to 10k signatures
+        
+        // Limit preloading to prevent memory issues
         let signatures_to_load: Vec<_> = signatures.into_iter().take(max_preload).collect();
         
         for sig in signatures_to_load {
@@ -56,7 +59,7 @@ impl RValueCache {
         }
         
         // Log if we limited the preload
-        if signatures.len() > max_preload {
+        if signatures_len > max_preload {
             tracing::warn!("Limited preload to {} signatures to prevent memory issues", max_preload);
         }
     }
