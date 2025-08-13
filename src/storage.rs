@@ -125,7 +125,7 @@ impl Database {
             // First try to update existing record
             let updated = self.conn.execute(
                 "UPDATE script_analysis SET count = ?, updated_at = CURRENT_TIMESTAMP WHERE script_type = ?",
-                (count, script_type_str),
+                (count, script_type_str.clone()),
             )?;
             
             // If no rows were updated, insert new record
