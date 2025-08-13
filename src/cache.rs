@@ -23,10 +23,19 @@ impl RValueCache {
             // R-value reuse detected! Return the first existing signature
             let first_signature = existing_signatures.first().unwrap().clone();
             
-            // Add the new signature to the list
-            let mut updated_signatures = existing_signatures.clone();
-            updated_signatures.push(signature);
-            cache.put(r_value.to_string(), updated_signatures);
+            // CRITICAL FIX: Limit signatures per R-value to prevent memory leaks
+            let max_signatures_per_r = 10; // Store max 10 signatures per R-value
+            
+            if existing_signatures.len() < max_signatures_per_r {
+                // Add the new signature to the list (within limit)
+                let mut updated_signatures = existing_signatures.clone();
+                updated_signatures.push(signature);
+                cache.put(r_value.to_string(), updated_signatures);
+            } else {
+                // Log that we're hitting the limit
+                tracing::warn!("R-value {} has {} signatures, limiting to prevent memory leak", 
+                    r_value, existing_signatures.len());
+            }
             
             Some(first_signature)
         } else {

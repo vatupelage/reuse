@@ -75,13 +75,34 @@ pub fn attempt_recover_k_and_priv(
     let expected_pubkey = k256::PublicKey::from_sec1_bytes(&expected_pubkey_bytes)
         .map_err(|e| anyhow!("Invalid public key format: {}", e))?;
     
-    // Compare the recovered public key with the expected one
+    // ENHANCED VALIDATION: Multiple checks for correctness
     if recovered_pubkey != expected_pubkey {
         tracing::warn!("Private key recovery validation failed for R-value {}", sig1.r);
         return Ok(None); // Recovery failed validation
     }
     
-    tracing::info!("Successfully recovered private key for R-value {}", sig1.r);
+    // ADDITIONAL VALIDATION: Verify the private key can sign and verify
+    // Create a test message and verify the signature
+    let test_message = b"Bitcoin ECDSA vulnerability test";
+    let test_hash = sha2::Sha256::digest(test_message);
+    
+    // Convert hash to scalar
+    let test_scalar = Scalar::from_repr_vartime(test_hash.into())
+        .ok_or_else(|| anyhow!("Invalid test hash scalar"))?;
+    
+    // Create signature with recovered private key
+    let test_signature = k256::ecdsa::SigningKey::from_bytes(&priv_key.to_bytes())
+        .map_err(|e| anyhow!("Invalid signing key: {}", e))?
+        .sign(&test_hash);
+    
+    // Verify signature with recovered public key
+    let verification_result = recovered_pubkey.verify(&test_hash, &test_signature);
+    if verification_result.is_err() {
+        tracing::warn!("Private key signature verification failed for R-value {}", sig1.r);
+        return Ok(None); // Recovery failed signature verification
+    }
+    
+    tracing::info!("Successfully recovered and validated private key for R-value {}", sig1.r);
 
     // Convert private key to WIF format
     let private_key_wif = scalar_to_wif(&priv_key)?;

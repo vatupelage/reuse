@@ -63,7 +63,7 @@ pub async fn parse_block(
     let mut tx_cache: HashMap<bitcoin::Txid, Transaction> = HashMap::new();
     
     for txid in &required_txids {
-        // Use the rate limiter to respect the configured rate limit
+        // CRITICAL FIX: Apply rate limiting between EACH transaction fetch
         rate_limiter.wait_if_needed().await;
         
         match rpc.get_transaction(txid).await {
@@ -202,9 +202,11 @@ fn calculate_message_hash_with_cache(
             },
             ScriptType::P2WSH => {
                 // SegWit v0 signature hash for P2WSH
+                // CRITICAL FIX: Extract witness script from witness data, not from prev_output
+                let witness_script = extract_witness_script_from_input(input)?;
                 let hash = sighash_cache.segwit_signature_hash(
                     input_index, 
-                    &prev_output.script_pubkey, 
+                    &witness_script,  // FIXED: Use actual witness script, not prev_output script
                     prev_output.value, 
                     sighash_type
                 )?;
@@ -212,12 +214,33 @@ fn calculate_message_hash_with_cache(
             },
             ScriptType::P2SH => {
                 // P2SH can contain legacy or SegWit scripts
-                let hash = sighash_cache.legacy_signature_hash(
-                    input_index, 
-                    &prev_output.script_pubkey, 
-                    sighash_type.to_u32()
-                )?;
-                *hash.as_byte_array()
+                // CRITICAL FIX: Extract redeem script from scriptSig, not from prev_output
+                let redeem_script = extract_redeem_script_from_input(input)?;
+                
+                // Determine the actual script type from the redeem script
+                let actual_script_type = determine_script_type(&redeem_script);
+                
+                match actual_script_type {
+                    ScriptType::P2WPKH | ScriptType::P2WSH => {
+                        // P2SH-wrapped SegWit: use SegWit sighash
+                        let hash = sighash_cache.segwit_signature_hash(
+                            input_index, 
+                            &redeem_script,  // Use redeem script
+                            prev_output.value, 
+                            sighash_type
+                        )?;
+                        *hash.as_byte_array()
+                    },
+                    _ => {
+                        // P2SH-wrapped legacy: use legacy sighash
+                        let hash = sighash_cache.legacy_signature_hash(
+                            input_index, 
+                            &redeem_script,  // Use redeem script, not prev_output script
+                            sighash_type.to_u32()
+                        )?;
+                        *hash.as_byte_array()
+                    }
+                }
             },
             _ => {
                 return Err(anyhow!("Unsupported script type for sighash calculation: {:?}", script_type));
@@ -294,13 +317,29 @@ fn extract_pubkey_and_address(input: &TxIn) -> Result<Option<(PublicKey, String,
         }
     }
 
-    // Check scriptSig for P2PKH
+    // Check scriptSig for P2PKH and P2SH-P2WPKH (nested SegWit)
     for instruction in input.script_sig.instructions() {
         if let Ok(Instruction::PushBytes(bytes)) = instruction {
             if is_likely_pubkey(bytes.as_bytes()) {
                 if let Ok(pubkey) = PublicKey::from_slice(bytes.as_bytes()) {
                     let address = pubkey_to_address(&pubkey);
                     return Ok(Some((pubkey, address, ScriptType::P2PKH)));
+                }
+            }
+            
+            // ENHANCED: Check for P2SH-P2WPKH (nested SegWit)
+            // The redeem script should be a P2WPKH script
+            if bytes.as_bytes().len() == 22 && bytes.as_bytes()[0] == 0x00 && bytes.as_bytes()[1] == 0x14 {
+                // This looks like a P2WPKH redeem script in P2SH
+                // Extract the public key from witness data
+                if input.witness.len() >= 2 {
+                    let pubkey_bytes = &input.witness[1]; // Second witness item is usually the public key
+                    if is_likely_pubkey(pubkey_bytes) {
+                        if let Ok(pubkey) = PublicKey::from_slice(pubkey_bytes) {
+                            let address = pubkey_to_address(&pubkey);
+                            return Ok(Some((pubkey, address, ScriptType::P2SH))); // Mark as P2SH for proper handling
+                        }
+                    }
                 }
             }
         }
@@ -326,4 +365,31 @@ fn pubkey_to_address(pubkey: &PublicKey) -> String {
     // Convert to Bitcoin address (mainnet)
     let address = Address::p2pkh(pubkey, Network::Bitcoin);
     address.to_string()
+}
+
+fn extract_witness_script_from_input(input: &TxIn) -> Result<Script> {
+    // For P2WSH, the witness script is typically the last witness item
+    // The witness structure is: [signature, public_key, witness_script]
+    if input.witness.len() >= 3 {
+        // The last item should be the witness script
+        let witness_script_bytes = input.witness.last().unwrap();
+        Ok(Script::new(witness_script_bytes.to_vec()))
+    } else {
+        Err(anyhow!("P2WSH input must have at least 3 witness items"))
+    }
+}
+
+fn extract_redeem_script_from_input(input: &TxIn) -> Result<Script> {
+    // For P2SH, the redeem script is in the scriptSig
+    // Look for the last push operation in scriptSig
+    let mut redeem_script = None;
+    
+    for instruction in input.script_sig.instructions() {
+        if let Ok(Instruction::PushBytes(bytes)) = instruction {
+            // The last push operation is typically the redeem script
+            redeem_script = Some(Script::new(bytes.as_bytes().to_vec()));
+        }
+    }
+    
+    redeem_script.ok_or_else(|| anyhow!("No redeem script found in P2SH input"))
 }
