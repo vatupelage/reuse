@@ -99,6 +99,7 @@ fn derive_pubkey_from_private(private_key: &Scalar) -> Result<k256::PublicKey> {
     use k256::elliptic_curve::scalar::NonZeroScalar;
     
     let non_zero_scalar = NonZeroScalar::<k256::Secp256k1>::from_repr(private_key.to_bytes())
+        .into_option()
         .ok_or_else(|| anyhow!("Invalid private key: zero or out of range"))?;
     
     // Derive public key from NonZeroScalar
