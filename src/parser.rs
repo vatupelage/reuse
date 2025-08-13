@@ -38,7 +38,7 @@ pub async fn parse_block(
     
     // Rate limiting configuration
     let batch_size = 3; // Process 3 transactions at a time
-    let delay_between_requests = 200; // 200ms between individual requests
+    let delay_between_requests = 1000; // 1000ms = 1 second between individual requests
     let delay_between_batches = 1000; // 1 second between batches
     let retry_delay = 2000; // 2 seconds after rate limit
     
